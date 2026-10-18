@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "Checks that PedInterp works under Pyodide, as in a browser (see check.mjs)",
+  "dependencies": {
+    "pyodide": "0.29.5"
+  }
+}

@@ -1,5 +1,9 @@
+import importlib.util
 import os
 import shutil
+import subprocess
+import sys
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -7,24 +11,28 @@ import pytest
 from PIL import Image, ImageDraw, ImageFont
 
 from PedInterp import PED_export, pedigree_processing
-from PedInterp.core import categorize_normalize_lines, detect_symbols, merge_duplicate_lines, stroke_width
+from PedInterp.core import (categorize_normalize_lines, detect_symbols, erase_loose_marks, generation_id,
+                            generation_places, merge_duplicate_lines, roman_numeral, stroke_width)
 
-needs_tesseract = pytest.mark.skipif(shutil.which('tesseract') is None, reason='needs the Tesseract OCR engine')
+needs_tesseract = pytest.mark.skipif(shutil.which('tesseract') is None or importlib.util.find_spec('pytesseract') is None,
+                                     reason='needs the Tesseract OCR engine and pytesseract')
 
 SYMBOL = 40   # the width of a symbol, in pixels
 COLUMNS = ['IndividualID', 'PaternalID', 'MaternalID', 'Sex', 'Phenotype']
 
 
-def draw_pedigree(path, people, couples, size, symbol=SYMBOL, line=3, **save_options):
+def draw_pedigree(path, people, couples, size, symbol=SYMBOL, line=3, labels=True, **save_options):
     '''
     Draws a pedigree in the usual style, in black on white, with symbols symbol pixels across and lines line pixels wide.
     people: id -> (x, y, sex 'M', 'F' or 'U', affected), with (x, y) the middle of the person's symbol
     couples: (partner drawn on the left, partner drawn on the right, [children])
+    labels: whether to write each person's id under their symbol
     '''
-    try:
-        font = ImageFont.truetype('DejaVuSans.ttf', 22)
-    except OSError:
-        pytest.skip('needs the DejaVu Sans font to draw the labels')
+    if labels:
+        try:
+            font = ImageFont.truetype('DejaVuSans.ttf', 22)
+        except OSError:
+            pytest.skip('needs the DejaVu Sans font to draw the labels')
     image = Image.new('RGB', size, 'white')
     draw = ImageDraw.Draw(image)
     half = symbol / 2
@@ -49,7 +57,8 @@ def draw_pedigree(path, people, couples, size, symbol=SYMBOL, line=3, **save_opt
             draw.ellipse(box, outline='black', width=line, fill=fill)
         else:
             draw.polygon([(x, y - half), (x + half, y), (x, y + half), (x - half, y)], outline='black', width=line, fill=fill)
-        draw.text((x, y + half + 8), str(person), fill='black', font=font, anchor='mt')
+        if labels:
+            draw.text((x, y + half + 8), str(person), fill='black', font=font, anchor='mt')
     image.save(path, **save_options)
 
 
@@ -90,6 +99,65 @@ FOUR_GENERATIONS_READ = {'11': ['0', '0', '1', '2'], '12': ['0', '0', '2', '1'],
                          '31': ['22', '21', '1', '2'], '35': ['0', '0', '2', '1'],
                          '32': ['23', '24', '2', '2'], '33': ['23', '24', '0', '1'], '34': ['23', '24', '1', '1'],
                          '41': ['31', '35', '2', '2'], '42': ['31', '35', '1', '1']}
+
+# the same pedigrees with the people numbered rather than read: by generation, from the top, and from the left in each,
+# and listed in that order
+TWO_GENERATIONS_NUMBERED = [['I-1', '0', '0', '1', '2'],
+                            ['I-2', '0', '0', '2', '1'],
+                            ['II-1', 'I-1', 'I-2', '1', '2'],
+                            ['II-2', 'I-1', 'I-2', '2', '1']]
+THREE_GENERATIONS_NUMBERED = [['I-1', '0', '0', '1', '2'],
+                              ['I-2', '0', '0', '2', '1'],
+                              ['II-1', 'I-1', 'I-2', '2', '2'],
+                              ['II-2', '0', '0', '1', '1'],
+                              ['II-3', 'I-1', 'I-2', '1', '1'],
+                              ['III-1', 'II-2', 'II-1', '1', '2'],
+                              ['III-2', 'II-2', 'II-1', '2', '1'],
+                              ['III-3', 'II-2', 'II-1', '0', '1']]
+FOUR_GENERATIONS_NUMBERED = [['I-1', '0', '0', '1', '2'],
+                             ['I-2', '0', '0', '2', '1'],
+                             ['II-1', 'I-1', 'I-2', '2', '1'],
+                             ['II-2', '0', '0', '1', '1'],
+                             ['II-3', '0', '0', '2', '1'],
+                             ['II-4', 'I-1', 'I-2', '1', '2'],
+                             ['III-1', 'II-2', 'II-1', '1', '2'],
+                             ['III-2', '0', '0', '2', '1'],
+                             ['III-3', 'II-4', 'II-3', '2', '2'],
+                             ['III-4', 'II-4', 'II-3', '0', '1'],
+                             ['III-5', 'II-4', 'II-3', '1', '1'],
+                             ['IV-1', 'III-1', 'III-2', '2', '2'],
+                             ['IV-2', 'III-1', 'III-2', '1', '1']]
+NUMBERED = {'two': (TWO_GENERATIONS, TWO_GENERATIONS_NUMBERED),
+            'three': (THREE_GENERATIONS, THREE_GENERATIONS_NUMBERED),
+            'four': (FOUR_GENERATIONS, FOUR_GENERATIONS_NUMBERED)}
+
+
+def fake_ocr(people, size, read=None, extra=()):
+    '''
+    An OCR function, for pedigree_processing's ocr argument, that reads the labels draw_pedigree writes from where it
+    writes them, as if it were perfect OCR. It keeps the images it is given in its list images.
+    read: the text it reads for each person (the default is their label), or None for a label it misses
+    extra: other words it reads, as (text, left, top, width, height) in the drawing's pixels
+    '''
+    font = ImageFont.truetype('DejaVuSans.ttf', 22)
+    read = read or {}
+
+    def ocr(image):
+        ocr.images.append(image)
+        # the image is the drawing enlarged, and the words' boxes must be in its pixels
+        scale = image.shape[1] / size[0]
+        words = []
+        for person, (x, y, _, _) in people.items():
+            text = read.get(person, str(person))
+            if text is not None:
+                left, top, right, bottom = font.getbbox(str(person), anchor='mt')
+                top += y + SYMBOL / 2 + 8
+                bottom += y + SYMBOL / 2 + 8
+                words.append((text, scale * (x + left), scale * top, scale * (right - left), scale * (bottom - top)))
+        return words + [(text, *(scale * value for value in box)) for text, *box in extra]
+
+    ocr.images = []
+    return ocr
 
 
 @pytest.fixture
@@ -250,3 +318,150 @@ def test_line_width():
     mask[100:103, 20:380] = 255
     mask[20:380, 200:203] = 255
     assert stroke_width(mask) == 3
+
+
+# Numbering people, without OCR. None of these tests needs Tesseract
+
+@pytest.mark.parametrize('pedigree', ['two', 'three', 'four'])
+def test_numbering_with_the_labels_left_in(tmp_path, pedigree):
+    # the labels are drawn but not read, and must be taken neither for symbols nor for lines
+    drawing, numbered = NUMBERED[pedigree]
+    draw_pedigree(tmp_path / 'pedigree.png', *drawing)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', UserWarning)
+        df = pedigree_processing('FAMN', image_path=str(tmp_path / 'pedigree.png'), ocr=None)
+    assert list(df.columns) == ['FamilyID'] + COLUMNS
+    assert as_rows(df) == numbered
+
+
+@pytest.mark.parametrize('pedigree', ['two', 'three', 'four'])
+def test_numbering_a_pedigree_without_labels(tmp_path, pedigree):
+    drawing, numbered = NUMBERED[pedigree]
+    draw_pedigree(tmp_path / 'pedigree.png', *drawing, labels=False)
+    df = pedigree_processing('FAMN', image_path=str(tmp_path / 'pedigree.png'), ocr='none')
+    assert as_rows(df) == numbered
+
+
+@pytest.mark.parametrize('line', [1, 3])
+@pytest.mark.parametrize('affected', [True, False])
+def test_numbering_with_holes_in_the_labels(tmp_path, line, affected):
+    # the holes in letters and numbers such as B, o, 6, 8, A, D, Q and 9 are white space inside an outline, like the
+    # inside of an unfilled symbol. They must be left out even when the lines are thinner than the strokes of the text,
+    # and when no symbol is filled, so that the filled symbols' size can't be compared with
+    names = {101: 'Bob 68', 102: 'Ada 49', 201: 'D8 Q', 202: 'Pam 96'}
+    people, couples, size = TWO_GENERATIONS
+    people = {names[person]: (x, y, sex, was_affected and affected) for person, (x, y, sex, was_affected) in people.items()}
+    couples = [(names[left], names[right], [names[child] for child in children]) for left, right, children in couples]
+    draw_pedigree(tmp_path / 'pedigree.png', people, couples, size, line=line)
+    df = pedigree_processing('FAMH', image_path=str(tmp_path / 'pedigree.png'), ocr=None)
+    assert as_rows(df) == [row[:4] + [row[4] if affected else '1'] for row in TWO_GENERATIONS_NUMBERED]
+
+
+def test_ocr_function(tmp_path):
+    people, couples, size = THREE_GENERATIONS
+    draw_pedigree(tmp_path / 'pedigree.png', *THREE_GENERATIONS)
+    # as Tesseract does, the function also gives words without any text, and reads a circle as the letter O.
+    # Such "text" is as tall as a symbol, and is left out, rather than being taken for a label and blanked out
+    ocr = fake_ocr(people, size, extra=[('', 0, 0, *size), ('O', 500, 50, 40, 40)])
+    df = pedigree_processing('FAME', image_path=str(tmp_path / 'pedigree.png'), ocr=ocr)
+    assert as_rows(df) == THREE_GENERATIONS_READ
+    # the function was given the drawing enlarged three times, in grey
+    (image,) = ocr.images
+    assert image.dtype == np.uint8
+    assert image.shape == (3 * size[1], 3 * size[0])
+
+
+def test_labels_that_were_not_read(tmp_path):
+    # OCR misses two labels, which are left in the drawing: the two people are numbered by their place in it
+    people, couples, size = THREE_GENERATIONS
+    draw_pedigree(tmp_path / 'pedigree.png', *THREE_GENERATIONS)
+    ocr = fake_ocr(people, size, read={202: None, 303: None})
+    with pytest.warns(UserWarning, match=r'2 symbol\(s\) had no label .* instead: II-2, III-3\.'):
+        df = pedigree_processing('FAME', image_path=str(tmp_path / 'pedigree.png'), ocr=ocr)
+    assert as_rows(df) == [['101', '0', '0', '1', '2'],
+                           ['102', '0', '0', '2', '1'],
+                           ['201', '101', '102', '2', '2'],
+                           ['II-2', '0', '0', '1', '1'],
+                           ['203', '101', '102', '1', '1'],
+                           ['301', 'II-2', '201', '1', '2'],
+                           ['302', 'II-2', '201', '2', '1'],
+                           ['III-3', 'II-2', '201', '0', '1']]
+
+
+def test_number_that_is_also_a_label(tmp_path):
+    # the drawing has labels of its own in the same style, but the man who married into the family is numbered last
+    # in his generation. When OCR misses II-2, under the third symbol in the row, numbering it II-3 would give two
+    # people the same ID, so it is marked with a star
+    names = {101: 'I-1', 102: 'I-2', 201: 'II-1', 202: 'II-3', 203: 'II-2', 301: 'III-1', 302: 'III-2', 303: 'III-3'}
+    people, couples, size = THREE_GENERATIONS
+    people = {names[person]: place for person, place in people.items()}
+    couples = [(names[left], names[right], [names[child] for child in children]) for left, right, children in couples]
+    draw_pedigree(tmp_path / 'pedigree.png', people, couples, size)
+    ocr = fake_ocr(people, size, read={'II-2': None})
+    with pytest.warns(UserWarning, match=r'instead: II-3\*\.'):
+        df = pedigree_processing('FAME', image_path=str(tmp_path / 'pedigree.png'), ocr=ocr)
+    assert as_rows(df) == [['I-1', '0', '0', '1', '2'],
+                           ['I-2', '0', '0', '2', '1'],
+                           ['II-1', 'I-1', 'I-2', '2', '2'],
+                           ['II-3', '0', '0', '1', '1'],
+                           ['II-3*', 'I-1', 'I-2', '1', '1'],
+                           ['III-1', 'II-3', 'II-1', '1', '2'],
+                           ['III-2', 'II-3', 'II-1', '2', '1'],
+                           ['III-3', 'II-3', 'II-1', '0', '1']]
+
+
+def test_no_labels_read(two_generations):
+    people, _, size = TWO_GENERATIONS
+    ocr = fake_ocr(people, size, read={person: None for person in people})
+    with pytest.warns(UserWarning, match='No labels were read'):
+        df = pedigree_processing('FAMC', raw_image_dir=str(two_generations), ocr=ocr)
+    assert as_rows(df) == TWO_GENERATIONS_NUMBERED
+
+
+def test_without_pytesseract(two_generations, monkeypatch):
+    # importing pytesseract fails while it is None in sys.modules
+    monkeypatch.setitem(sys.modules, 'pytesseract', None)
+    with pytest.warns(UserWarning, match="can't be read with Tesseract, as pytesseract is not installed"):
+        df = pedigree_processing('FAMC', raw_image_dir=str(two_generations))
+    assert as_rows(df) == TWO_GENERATIONS_NUMBERED
+
+
+def test_without_the_tesseract_program(two_generations, monkeypatch):
+    pytesseract = pytest.importorskip('pytesseract')
+    monkeypatch.setattr(pytesseract.pytesseract, 'tesseract_cmd', str(two_generations / 'no-tesseract-here'))
+    with pytest.warns(UserWarning, match="can't be read with Tesseract, as the tesseract program was not found"):
+        df = pedigree_processing('FAMC', raw_image_dir=str(two_generations))
+    assert as_rows(df) == TWO_GENERATIONS_NUMBERED
+
+
+def test_imports_without_pytesseract():
+    code = "import sys; sys.modules['pytesseract'] = None; import PedInterp; print('imported')"
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
+    assert result.stdout.strip() == 'imported', result.stderr
+
+
+def test_unknown_ocr():
+    with pytest.raises(ValueError, match='ocr must be'):
+        pedigree_processing('FAMC', ocr='tesseract.js')
+
+
+def test_roman_numerals():
+    assert [roman_numeral(n) for n in (1, 2, 3, 4, 5, 9, 10, 14, 40, 90, 400, 1994)] == \
+        ['I', 'II', 'III', 'IV', 'V', 'IX', 'X', 'XIV', 'XL', 'XC', 'CD', 'MCMXCIV']
+
+
+def test_generation_places():
+    # the symbols of a row needn't be drawn quite level, and come in any order
+    boxes = [(500, 105, 40, 40), (100, 100, 40, 40), (300, 112, 40, 40), (200, 300, 40, 40), (50, 290, 40, 40)]
+    assert generation_places(boxes) == [(0, 2), (0, 0), (0, 1), (1, 1), (1, 0)]
+    assert generation_id(1, 0) == 'II-1'
+
+
+def test_erasing_loose_marks():
+    image = np.full((100, 300), 255, np.uint8)
+    image[40:60, 10:30] = 0      # a symbol
+    image[49:51, 30:200] = 0     # a line from it
+    image[40:60, 250:260] = 0    # a mark that touches neither
+    erase_loose_marks(image, [(5, 35, 35, 65)])
+    assert (image[40:60, 10:30] == 0).all() and (image[49:51, 30:200] == 0).all()
+    assert (image[40:60, 250:260] == 255).all()

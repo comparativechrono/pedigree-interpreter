@@ -1,11 +1,14 @@
-import pytesseract
 import cv2
 import math
+import sys
 import warnings
 import numpy as np
 from PIL import Image
 from os import makedirs
 import pandas as pd
+#pytesseract is imported only when the labels are read with Tesseract (see tesseract_words), so that PedInterp
+#works without it, as in a browser under Pyodide, which can't run the tesseract program
+
 #-----------------------------
 # PED Data Frame Object Class
 #-----------------------------
@@ -71,6 +74,19 @@ def upscaled_image(image_path, upscale_factor = 10):
     upscaled_img = img.resize(new_size, _resample_filter())
     return cv2.cvtColor(np.array(upscaled_img), cv2.COLOR_RGB2BGR)
 
+def upscaled_gray_image(image_path, upscale_factor = 10):
+    '''
+    Reads a pedigree image and upscales it in memory, in grey. The image is made grey before it is enlarged rather
+    than after, which takes a third of the memory, and gives the same image for a drawing in black, white and grey
+
+    RETURN:
+    -------
+    the upscaled image as a grey OpenCV array
+    '''
+    img = Image.open(image_path).convert('RGB').convert('L')
+    new_size = (round(img.width * upscale_factor), round(img.height * upscale_factor))
+    return np.array(img.resize(new_size, _resample_filter()))
+
 def linDist(coord1, coord2):
     x1, y1 = coord1
     x2, y2 = coord2
@@ -89,6 +105,117 @@ def closestLabel(marker_coords, label_dict):
             closest_distance = distance
             closestLabel = label
     return closestLabel
+
+
+#-----------------------------
+# READING THE LABELS
+#-----------------------------
+class TesseractUnavailable(RuntimeError):
+    '''Tesseract can't be used: pytesseract isn't installed, or the tesseract program can't be run'''
+
+def tesseract_words(image):
+    '''
+    Reads the words in a grey image with Tesseract. The labels are scattered over the drawing rather than set in
+    lines of text, which is what Tesseract's sparse text mode (11) is for.
+
+    RETURN:
+    -------
+    a list of (text, left, top, width, height), in the image's pixels.
+    Raises TesseractUnavailable, saying why, if pytesseract isn't installed or the tesseract program can't be run
+    '''
+    if sys.platform == 'emscripten':
+        raise TesseractUnavailable('Pyodide cannot run other programs, such as tesseract')
+    try:
+        import pytesseract
+    except ImportError:
+        raise TesseractUnavailable('pytesseract is not installed') from None
+    try:
+        data = pytesseract.image_to_data(image, config= '--psm 11', output_type= pytesseract.Output.DICT)
+    except pytesseract.TesseractNotFoundError:
+        raise TesseractUnavailable(f'the tesseract program was not found (pytesseract looked for '
+                                   f'"{pytesseract.pytesseract.tesseract_cmd}")') from None
+    except OSError as error:
+        raise TesseractUnavailable(f'the tesseract program could not be run ({error})') from None
+    return list(zip(data['text'], data['left'], data['top'], data['width'], data['height']))
+
+def label_boxes(words, scale):
+    '''
+    Picks out the labels from the words that OCR read, and scales their boxes up to the enlarged image
+
+    PARAMETERS:
+    -----------
+    words: (text, left, top, width, height) for each word, in the pixels of the image that was read
+    scale (number): how much larger the enlarged image is than the image that was read
+
+    RETURN:
+    -------
+    a dict of each label's box (x, y, w, h) in the enlarged image, and a list of the boxes of all the labels,
+    which includes any label that appears more than once
+    '''
+    words = [('' if text is None else str(text).strip(), left, top, width, height)
+             for text, left, top, width, height in words]
+    words = [word for word in words if word[0]]
+    #a symbol is sometimes read as a letter (a circle as O): such "text" is as tall as a symbol, much taller than the labels
+    label_height = float(np.median([height for _, _, _, _, height in words])) if words else 0
+    labels = {}
+    boxes = []
+    for text, left, top, width, height in words:
+        if height <= 1.5*label_height:
+            box = tuple(int(scale*value) for value in (left, top, width, height))
+            if text in labels:
+                warnings.warn(f'The label {text} appears more than once; only the last is used')
+            labels[text] = box
+            boxes.append(box)
+    return labels, boxes
+
+
+#-----------------------------
+# NUMBERING PEOPLE
+#-----------------------------
+def roman_numeral(number):
+    '''A whole number from 1 up in Roman numerals'''
+    numerals = ((1000, 'M'), (900, 'CM'), (500, 'D'), (400, 'CD'), (100, 'C'), (90, 'XC'),
+                (50, 'L'), (40, 'XL'), (10, 'X'), (9, 'IX'), (5, 'V'), (4, 'IV'), (1, 'I'))
+    roman = ''
+    for value, numeral in numerals:
+        while number >= value:
+            roman += numeral
+            number -= value
+    return roman
+
+def generation_places(boxes):
+    '''
+    Places symbols in the rows of the drawing, which are the generations. The middles of the symbols are taken from
+    the top down, and a gap of more than half a symbol's height from one to the next starts a new row, so a symbol
+    drawn a little higher or lower than the others in its row stays in it.
+
+    PARAMETERS:
+    -----------
+    boxes: the symbols' bounding boxes (x, y, w, h)
+
+    RETURN:
+    -------
+    for each box, (row, place in the row), both counted from 0, with the rows from the top and the places from the left
+    '''
+    if not boxes:
+        return []
+    middles = [y + h/2 for _, y, _, h in boxes]
+    gap = 0.5*float(np.median([h for _, _, _, h in boxes]))
+    from_top = sorted(range(len(boxes)), key= lambda i: middles[i])
+    rows = [[from_top[0]]]
+    for above, i in zip(from_top, from_top[1:]):
+        if middles[i] - middles[above] > gap:
+            rows.append([])
+        rows[-1].append(i)
+    places = [None]*len(boxes)
+    for row, members in enumerate(rows):
+        for place, i in enumerate(sorted(members, key= lambda i: boxes[i][0] + boxes[i][2]/2)):
+            places[i] = (row, place)
+    return places
+
+def generation_id(row, place):
+    '''The usual ID for the person at a place in a row (both counted from 0): generation, in Roman numerals, and number'''
+    return f'{roman_numeral(row + 1)}-{place + 1}'
 
 
 #-----------------------------
@@ -132,14 +259,21 @@ def open_with_disc(mask, radius):
     '''
     Morphological opening of a mask (255 where set) with a disc of the given radius: what is left is every part that
     a disc of that size fits inside. Done with two distance transforms, which take the same time for a disc of any size.
+    The distances take four bytes a pixel, so one array of them serves for both transforms, and the masks made from
+    them take a byte a pixel: an image enlarged ten times is large, and memory is short in a browser.
     '''
-    #erosion: the places at least the radius from the edge of the mask
-    core = cv2.distanceTransform(mask, cv2.DIST_L2, cv2.DIST_MASK_PRECISE) > radius
-    if not core.any():
+    #erosion: the places more than the radius from the edge of the mask (the core), where the distances are over it
+    distance = cv2.distanceTransform(mask, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    if cv2.minMaxLoc(distance)[1] <= radius:
         return np.zeros_like(mask)
-    #dilation: the places within the radius of what was left
-    near_core = cv2.distanceTransform(np.where(core, 0, 255).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE) <= radius
-    return np.where(near_core & (mask > 0), 255, 0).astype(np.uint8)
+    outside_core = cv2.compare(distance, radius, cv2.CMP_LE)
+    #dilation: the places within the radius of the core
+    cv2.distanceTransform(outside_core, cv2.DIST_L2, cv2.DIST_MASK_PRECISE, dst= distance)
+    del outside_core
+    opened = cv2.compare(distance, radius, cv2.CMP_LE)
+    del distance
+    opened[mask == 0] = 0
+    return opened
 
 def detect_symbols(gray_img, img_area):
     '''
@@ -147,19 +281,30 @@ def detect_symbols(gray_img, img_area):
     removed first so that a line touching a symbol doesn't join it to the rest of the drawing, and
     unfilled (unaffected) symbols from the white space inside their outlines.
 
+    The holes in the letters and numbers of any labels left in the drawing (in 0, 6, 8, 9, A, B, D and so on) are
+    white space inside an outline too, but they are much smaller than the symbols. So anything less than three line
+    widths across is left out, and so is anything less than 0.4 times the size of a typical symbol: the median size
+    of the filled symbols, which text never passes for, or if none is filled, the size that nine in ten of the
+    shapes found are smaller than. The three line widths aren't enough on their own, as the lines of a drawing can
+    be much thinner than the strokes of its text.
+
     RETURN:
     -------
     symbols (list of (bounding box (x, y, w, h), Sex, Phenotype)), and the width of the drawing's lines in pixels
     '''
-    _, threshold_light = cv2.threshold(gray_img, 250, 255, cv2.THRESH_BINARY)
+    #(each mask is made only when it's needed, and let go as soon as it isn't, to save memory)
     _, threshold_dark = cv2.threshold(gray_img, 5, 255, cv2.THRESH_BINARY_INV)
 
     #lines are narrower than the symbols: opening the dark parts with a disc wider than a line removes the lines and keeps filled symbols
     line_width = stroke_width(threshold_dark)
     filled_symbols = open_with_disc(threshold_dark, 1.5*line_width)
-
-    light_contours, hierarchy = cv2.findContours(threshold_light, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    del threshold_dark
     dark_contours, _ = cv2.findContours(filled_symbols, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    del filled_symbols
+
+    _, threshold_light = cv2.threshold(gray_img, 250, 255, cv2.THRESH_BINARY)
+    light_contours, hierarchy = cv2.findContours(threshold_light, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    del threshold_light
 
     #the white inside an outline is a patch of white of its own, whose edge is an outer contour, at an even depth in
     #the tree of contours. The contours at odd depths are the edges of dark shapes seen from the white around them:
@@ -172,7 +317,7 @@ def detect_symbols(gray_img, img_area):
         return d
     light_contours = [contour for i, contour in enumerate(light_contours) if depth(i) % 2 == 0]
 
-    symbols = []
+    candidates = []
     for phenotype, contours in ((2, dark_contours), (1, light_contours)):
         for contour in contours:
             #scaling epsilon used in polyaprox based on perimeter of the contour
@@ -182,8 +327,42 @@ def detect_symbols(gray_img, img_area):
             x,y,w,h = cv2.boundingRect(approx)
             bounding_area = w*h
             if bounding_area < 0.25*img_area and bounding_area > 0.0001*img_area and abs(w-h) < (min(w,h) * 0.25):
-                symbols.append(((x, y, w, h), symbol_sex(contour), phenotype))
+                candidates.append(((x, y, w, h), symbol_sex(contour), phenotype))
+    if not candidates:
+        return [], line_width
+
+    #leaving out the holes in text. Labels can have more holes than there are symbols, so when no symbol is filled,
+    #the typical symbol is one bigger than nine in ten of what was found
+    sizes = [max(w, h) for (_, _, w, h), _, _ in candidates]
+    filled_sizes = [size for size, (_, _, phenotype) in zip(sizes, candidates) if phenotype == 2]
+    typical = float(np.median(filled_sizes)) if filled_sizes else float(np.percentile(sizes, 90))
+    smallest = max(3*line_width, 0.4*typical)
+    symbols = [candidate for size, candidate in zip(sizes, candidates) if size >= smallest]
     return symbols, line_width
+
+def erase_loose_marks(binary_img, boxes):
+    '''
+    Whitens every dark shape in a black and white image (0 where dark) that reaches into none of the boxes, and
+    returns the image. With the boxes round the symbols, this clears away any text left in the drawing, and stray
+    marks, whose strokes could otherwise be taken for lines. Every line touches a symbol, so the lines stay.
+
+    PARAMETERS:
+    -----------
+    binary_img: the image, changed in place
+    boxes: the boxes, as (left, top, right, bottom)
+    '''
+    #each dark shape is numbered, from 1, and the white is 0
+    count, shapes = cv2.connectedComponents(cv2.bitwise_not(binary_img), connectivity= 8)
+    keep = np.zeros(count, dtype= bool)
+    keep[0] = True
+    height, width = binary_img.shape[:2]
+    for left, top, right, bottom in boxes:
+        left, top = max(0, int(left)), max(0, int(top))
+        right, bottom = min(width, int(right)), min(height, int(bottom))
+        if left < right and top < bottom:
+            keep[np.unique(shapes[top:bottom, left:right])] = True
+    binary_img[(~keep)[shapes]] = 255
+    return binary_img
 
 
 #-----------------------------
@@ -395,7 +574,8 @@ def pedigree_processing(FamID,
                         export= False,
                         output_dir = '.',
                         image_path = None,
-                        upscale_factor = 10):
+                        upscale_factor = 10,
+                        ocr = 'tesseract'):
     '''
     Reads a pedigree image into a dataframe laid out like a PED file
 
@@ -407,102 +587,136 @@ def pedigree_processing(FamID,
     output_dir (string): the folder to write the PED file in
     image_path (string, optional): the image to read, in any format Pillow reads
     upscale_factor (number): how many times to enlarge the image before reading it (default = 10)
+    ocr: how to read the labels (default = 'tesseract')
+        'tesseract': with Tesseract. If pytesseract isn't installed or the tesseract program can't be run,
+            people are numbered instead, with a warning that says why
+        None or 'none': the labels aren't read, and people are numbered
+        a function: given the grey image to be read (a numpy uint8 array of the image enlarged at most 3 times),
+            it returns the words in it as (text, left, top, width, height), in that image's pixels.
+            This is how other OCR, such as tesseract.js in a browser, can read the labels
+
+    People are numbered the standard way: the generations are the rows of symbols from the top, in Roman numerals,
+    and the people in each row are numbered from the left: I-1, I-2, II-1 and so on. When the labels are read,
+    anyone whose label wasn't read is numbered in the same way, with a warning.
 
     RETURN:
     -------
-    pandas.DataFrame with the columns FamilyID, IndividualID, PaternalID, MaternalID, Sex and Phenotype
+    pandas.DataFrame with the columns FamilyID, IndividualID, PaternalID, MaternalID, Sex and Phenotype,
+    with a row for each person, generation by generation, and from left to right in each
     '''
+    if ocr is None or (isinstance(ocr, str) and ocr.lower() == 'none'):
+        read_words = None
+    elif isinstance(ocr, str) and ocr.lower() == 'tesseract':
+        read_words = tesseract_words
+    elif callable(ocr):
+        read_words = ocr
+    else:
+        raise ValueError(f"ocr must be 'tesseract', 'none', None or a function, not {ocr!r}")
+    numbering = 'numbered by generation instead (I-1, I-2, II-1 and so on)'
+
     #----------------------------------------
     # ENHANCE IMAGE
     #----------------------------------------
     if image_path is None:
         image_path = f'{raw_image_dir}/{FamID}.png'
-    img = upscaled_image(image_path, upscale_factor)
-
-    #----------------------------------------
-    # INDIVIDUAL ID DETECTION
-    #----------------------------------------
-    img_height, img_width, _ = img.shape
+    gray_img = upscaled_gray_image(image_path, upscale_factor)
+    img_height, img_width = gray_img.shape
     img_area = img_height * img_width
-    gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
 
     #the drawing is black on white, so anything nearer white than black is taken as white: this clears the grey haze
     #that JPEG compression and scanning leave around lines and text
     _, redacted_img = cv2.threshold(gray_img, 127, 255, cv2.THRESH_BINARY)
+    del gray_img
 
+    #----------------------------------------
+    # INDIVIDUAL ID DETECTION
+    #----------------------------------------
     #Tesseract reads text best when it's a few tens of pixels high, and starts to misread labels enlarged ten times,
     #so the labels are read from a copy of the image enlarged no more than three times (in grey, which it also reads
-    #better), and their places are scaled up to match. The labels are scattered over the drawing rather than set
-    #in lines of text, which is what Tesseract's sparse text mode (11) is for
-    ocr_factor = min(upscale_factor, 3)
-    ocr_img = cv2.cvtColor(upscaled_image(image_path, ocr_factor), cv2.COLOR_BGR2GRAY)
-    scale = upscale_factor / ocr_factor
-    TextData = pytesseract.image_to_data(ocr_img, config= '--psm 11', output_type= pytesseract.Output.DICT)
-    IndvIDsDict = {}
-
-    n_boxes = len(TextData['text'])
-
-    #a symbol is sometimes read as a letter (a circle as O): such "text" is as tall as a symbol, much taller than the labels
-    heights = [TextData['height'][i] for i in range(n_boxes) if TextData['text'][i].strip()]
-    label_height = float(np.median(heights)) if heights else 0
-
-    for i in range(n_boxes):
-        IndvID = TextData['text'][i].strip()
-        if IndvID and TextData['height'][i] <= 1.5*label_height:
-            (x,y,w,h) = (int(scale*TextData[key][i]) for key in ('left', 'top', 'width', 'height'))
-            display_coords = (x,y,w,h)
-            if IndvID in IndvIDsDict:
-                warnings.warn(f'The label {IndvID} appears more than once; only the last is used')
-            IndvIDsDict[IndvID] = {}
-            IndvIDsDict[IndvID]['label_coords'] = display_coords
-            #draw a white rectangle over the ID number (with a little extra size for buffer)
-            redacted_img = cv2.rectangle(redacted_img, (x-10,y-10), (x+w+20, y+h+20), (255,255,255), -1)
-
-    if not IndvIDsDict:
-        raise ValueError(f'No labels were found in {image_path}. Tesseract seldom reads labels of a single character.')
+    #better), and their places are scaled up to match
+    labels, label_area = {}, []
+    if read_words is not None:
+        ocr_factor = min(upscale_factor, 3)
+        ocr_img = cv2.cvtColor(upscaled_image(image_path, ocr_factor), cv2.COLOR_BGR2GRAY)
+        try:
+            words = read_words(ocr_img)
+        except TesseractUnavailable as reason:
+            warnings.warn(f"The labels can't be read with Tesseract, as {reason}, so people are {numbering}. "
+                          'Pass ocr=None to number people without this warning.')
+        else:
+            labels, label_area = label_boxes(words if words is not None else [], upscale_factor / ocr_factor)
+            if not labels:
+                warnings.warn(f'No labels were read in {image_path}, so people are {numbering}.' +
+                              (' Tesseract seldom reads labels of a single character.' if read_words is tesseract_words else ''))
+        del ocr_img
+    for x, y, w, h in label_area:
+        #draw a white rectangle over the ID number (with a little extra size for buffer)
+        redacted_img = cv2.rectangle(redacted_img, (x-10,y-10), (x+w+20, y+h+20), (255,255,255), -1)
 
     #----------------------------------------
     # PHENOTYPE AND SEX DETECTION
     #----------------------------------------
-    nodeless_img = np.copy(redacted_img)
     symbols, line_width = detect_symbols(redacted_img, img_area)
+    if not symbols:
+        raise ValueError(f'No pedigree symbols were found in {image_path}')
 
     #each symbol goes with the nearest label, and each label keeps the nearest of the symbols that chose it
+    label_dict = {label: {'label_coords': box} for label, box in labels.items()}
     nearest = {}
-    unlabelled = 0
-    for (x, y, w, h), sex, phenotype in symbols:
+    for i, ((x, y, w, h), _, _) in enumerate(symbols):
+        if not label_dict:
+            break
         center_coords = ((x + w/2), y + h/2)
-        label = closestLabel(marker_coords= center_coords, label_dict= IndvIDsDict)
-        lx, ly, lw, lh = IndvIDsDict[label]['label_coords']
+        label = closestLabel(marker_coords= center_coords, label_dict= label_dict)
+        lx, ly, lw, lh = labels[label]
         distance = linDist(center_coords, (lx + lw/2, ly + lh/2))
-        if distance > 3*max(w, h):
-            unlabelled += 1
-            continue
-        if label in nearest:
-            unlabelled += 1
-            if distance > nearest[label][0]:
-                continue
-        nearest[label] = (distance, (x, y, w, h), sex, phenotype)
-    if unlabelled:
-        warnings.warn(f'{unlabelled} symbol(s) had no label of their own near them and were left out. '
-                      'Tesseract often misses labels of a single character.')
+        if distance <= 3*max(w, h) and (label not in nearest or distance <= nearest[label][0]):
+            nearest[label] = (distance, i)
+    IDs = {i: label for label, (_, i) in nearest.items()}
 
-    for label, (_, (x, y, w, h), sex, phenotype) in nearest.items():
-        IndvIDsDict[label]['node_coords'] = (x,y,w,h)
-        IndvIDsDict[label]['Phenotype'] = phenotype
-        IndvIDsDict[label]['Sex'] = sex
-        #blanking out the symbol, with a margin, so that only the lines between symbols are left
-        #(an unfilled symbol was found by the space inside its outline, so its outline is a line's width further out)
-        pad = (2 if phenotype == 1 else 1)*line_width + int(0.05*max(w, h))
-        IndvIDsDict[label]['pad'] = pad
-        nodeless_img = cv2.rectangle(nodeless_img, (x-pad, y-pad), (x+w+pad, y+h+pad), (255,255,255), -1)
-
-    unmatched = [label for label in IndvIDsDict if 'node_coords' not in IndvIDsDict[label]]
+    unmatched = [label for label in labels if label not in nearest]
     if unmatched:
         warnings.warn(f'No symbol was found for the text {", ".join(unmatched)}, which is left out')
-        for label in unmatched:
-            del IndvIDsDict[label]
+
+    #anyone without a label is numbered by their place in the drawing, which is also the order people are listed in.
+    #A label that was read can be the same as such a number (when the drawing's own labels are numbered like this,
+    #and one was misread), so a star is added to the number to keep the IDs apart
+    places = generation_places([box for box, _, _ in symbols])
+    in_order = sorted(range(len(symbols)), key= lambda i: places[i])
+    taken = set(IDs.values())
+    numbered = []
+    for i in in_order:
+        if i not in IDs:
+            IndvID = generation_id(*places[i])
+            while IndvID in taken:
+                IndvID += '*'
+            IDs[i] = IndvID
+            taken.add(IndvID)
+            numbered.append(IndvID)
+    if labels and numbered:
+        warnings.warn(f'{len(numbered)} symbol(s) had no label of their own near them, and are numbered by their '
+                      f'place in the drawing instead: {", ".join(numbered)}.' +
+                      (' Tesseract often misses labels of a single character.' if read_words is tesseract_words else ''))
+
+    IndvIDsDict = {}
+    for i in in_order:
+        (x, y, w, h), sex, phenotype = symbols[i]
+        #the margin round the symbol that is blanked out, so that only the lines between symbols are left
+        #(an unfilled symbol was found by the space inside its outline, so its outline is a line's width further out)
+        pad = (2 if phenotype == 1 else 1)*line_width + int(0.05*max(w, h))
+        IndvIDsDict[IDs[i]] = {'node_coords': (x,y,w,h), 'Phenotype': phenotype, 'Sex': sex, 'pad': pad}
+
+    #clearing away any text left in the drawing (all of it, when the labels aren't read) and any stray marks: whatever
+    #doesn't reach a symbol's outline, which is within a line's width of the box found for the symbol. (The margin
+    #blanked out is wider, and with thick lines it can reach the label under a symbol)
+    nodeless_img = erase_loose_marks(np.copy(redacted_img),
+                                     [(x - line_width, y - line_width, x + w + line_width, y + h + line_width)
+                                      for (x, y, w, h), _, _ in symbols])
+    #then blanking out the symbols
+    for person in IndvIDsDict.values():
+        x, y, w, h = person['node_coords']
+        pad = person['pad']
+        nodeless_img = cv2.rectangle(nodeless_img, (x-pad, y-pad), (x+w+pad, y+h+pad), (255,255,255), -1)
 
 
     #----------------------------------------

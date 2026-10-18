@@ -7,3 +7,9 @@ src/PedInterp/_version.py
 __pycache__/
 .pytest_cache/
 *.egg-info/
+
+# What the Pyodide check installs, downloads and draws
+tests/pyodide/node_modules/
+tests/pyodide/package-lock.json
+tests/pyodide/packages/
+tests/pyodide/work/
