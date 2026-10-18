@@ -4,4 +4,6 @@
 # Build artifacts
 dist/
 src/PedInterp/_version.py
-
+__pycache__/
+.pytest_cache/
+*.egg-info/

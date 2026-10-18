@@ -1,0 +1,27 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Tesseract and the font the tests draw with
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr fonts-dejavu-core libgl1
+      - name: Install PedInterp
+        run: pip install ".[test]"
+      - name: Run the tests
+        run: pytest
