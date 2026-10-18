@@ -60,7 +60,7 @@ Parents are worked out from the sex of the partners, so it doesn't matter which 
 Some things aren't read yet:
 
 - **labels of a single character**, which Tesseract seldom picks out. Labels of two or more characters, such as 12 or 101, are read well, but labels with Roman numerals, such as II-3, are often misread. A warning says how many symbols were left without a label
-- **half-filled or shaded symbols**, such as those used for carriers. The person is left out, with a warning
+- **half-filled, shaded or hatched symbols**, such as those used for carriers. A half-filled symbol is left out, with a warning. The drawing is made black and white before the symbols are looked for, so a shaded symbol is read as filled if the shading is dark and as empty if it's light, and a hatched one as empty
 - **a slash through the symbol of an unaffected person who has died**, which splits the symbol in two, so the person's sex may be misread
 - **lines that slope**, as for twins, which are left out with a warning
 

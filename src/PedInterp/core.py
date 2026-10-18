@@ -149,7 +149,7 @@ def detect_symbols(gray_img, img_area):
 
     RETURN:
     -------
-    list of (bounding box (x, y, w, h), Sex, Phenotype)
+    symbols (list of (bounding box (x, y, w, h), Sex, Phenotype)), and the width of the drawing's lines in pixels
     '''
     _, threshold_light = cv2.threshold(gray_img, 250, 255, cv2.THRESH_BINARY)
     _, threshold_dark = cv2.threshold(gray_img, 5, 255, cv2.THRESH_BINARY_INV)
@@ -193,39 +193,49 @@ def merge_duplicate_lines(norm_cat_lines, angle_threshold= 10, distance_threshol
     '''
     Joins lines that run along one another, less than distance_threshold apart, and that overlap or meet end to end:
     Hough finds both edges of a thick line, and often finds a line in pieces. Each joined line keeps the position
-    of the longer of the two.
+    of the longer of the two. The lines are gone over again until no more can be joined, so that the pieces of a
+    line are all joined whatever order they come in.
     '''
-    merged_horizontal_lines = []
-    for horz_line in norm_cat_lines['horizontal']:
-        a,hy1,b,hy2 = horz_line
-        for i in range(len(merged_horizontal_lines)):
-            c,mhy1,d,mhy2 = merged_horizontal_lines[i]
-            #sufficiently close vertically, and overlapping or touching
-            if abs(mhy1 - hy1) < distance_threshold and a <= d and c <= b:
-                y = hy1 if b - a > d - c else mhy1
-                merged_horizontal_lines[i] = (min(a, c), y, max(b, d), y)
-                break
-        else:
-            merged_horizontal_lines.append(horz_line)
+    def merge_horizontal(lines):
+        merged_horizontal_lines = []
+        for horz_line in lines:
+            a,hy1,b,hy2 = horz_line
+            for i in range(len(merged_horizontal_lines)):
+                c,mhy1,d,mhy2 = merged_horizontal_lines[i]
+                #sufficiently close vertically, and overlapping or touching
+                if abs(mhy1 - hy1) < distance_threshold and a <= d and c <= b:
+                    y = hy1 if b - a > d - c else mhy1
+                    merged_horizontal_lines[i] = (min(a, c), y, max(b, d), y)
+                    break
+            else:
+                merged_horizontal_lines.append(horz_line)
+        return merged_horizontal_lines
 
     #vertical lines run from the bottom (the larger y) up
-    merged_vertical_lines = []
-    for vert_line in norm_cat_lines['vertical']:
-        vx1,a,vx2,b = vert_line
-        for j in range(len(merged_vertical_lines)):
-            mvx1,c,mvx2,d = merged_vertical_lines[j]
-            #sufficiently close horizontally, and overlapping or touching
-            if abs(mvx1 - vx1) < distance_threshold and b <= c and d <= a:
-                x = vx1 if a - b > c - d else mvx1
-                merged_vertical_lines[j] = (x, max(a, c), x, min(b, d))
-                break
-        else:
-            merged_vertical_lines.append(vert_line)
+    def merge_vertical(lines):
+        merged_vertical_lines = []
+        for vert_line in lines:
+            vx1,a,vx2,b = vert_line
+            for j in range(len(merged_vertical_lines)):
+                mvx1,c,mvx2,d = merged_vertical_lines[j]
+                #sufficiently close horizontally, and overlapping or touching
+                if abs(mvx1 - vx1) < distance_threshold and b <= c and d <= a:
+                    x = vx1 if a - b > c - d else mvx1
+                    merged_vertical_lines[j] = (x, max(a, c), x, min(b, d))
+                    break
+            else:
+                merged_vertical_lines.append(vert_line)
+        return merged_vertical_lines
 
-    directional_merged_lines = {
-        'vertical': merged_vertical_lines,
-        'horizontal': merged_horizontal_lines
-    }
+    directional_merged_lines = {}
+    for direction, merge in (('vertical', merge_vertical), ('horizontal', merge_horizontal)):
+        lines = list(norm_cat_lines[direction])
+        while True:
+            merged = merge(lines)
+            if len(merged) == len(lines):
+                break
+            lines = merged
+        directional_merged_lines[direction] = merged
 
     return directional_merged_lines
 
@@ -283,7 +293,9 @@ def partners_at_ends(line, IndvID, IndvDataDict, distance_threshold):
             if PartnerID == IndvID:
                 continue
             px_left, py_top, pw, ph = IndvDataDict[PartnerID]['node_coords']
-            for side in ((px_left, py_top + ph/2), (px_left + pw, py_top + ph/2)):
+            #a line now stops at the edge of the margin blanked out round the symbol
+            ppad = IndvDataDict[PartnerID].get('pad', 0)
+            for side in ((px_left - ppad, py_top + ph/2), (px_left + pw + ppad, py_top + ph/2)):
                 distance = linDist(side, end)
                 if distance < best_distance:
                     best, best_distance = PartnerID, distance
@@ -299,9 +311,11 @@ def trackRelation(normalized_categorized_lines, IndvDataDict):
         inheritence_known = False
         #finding starting coordinate (top anchor)
         x_left, y_top, w, h = IndvDataDict[IndvID]['node_coords']
+        #the symbol was blanked out with a margin round it, so the lines meeting it now stop at the edge of the margin
+        pad = IndvDataDict[IndvID].get('pad', 0)
         x_mid = int(x_left + w/2)
-        top_center_coord = (x_mid, y_top)
-        IndvDataDict[IndvID]['lat_coords'] = [(int(x_left+w), int(y_top+(h/2))), (int(x_left), int(y_top+(h/2)))]
+        top_center_coord = (x_mid, y_top - pad)
+        IndvDataDict[IndvID]['lat_coords'] = [(int(x_left+w+pad), int(y_top+(h/2))), (int(x_left-pad), int(y_top+(h/2)))]
         distance_threshold = h/2
         #finding if there is veritcal line close to top anchor (i.e. if inheritence is known)
         for vert_line in normalized_categorized_lines['vertical']:
@@ -480,7 +494,8 @@ def pedigree_processing(FamID,
         IndvIDsDict[label]['Sex'] = sex
         #blanking out the symbol, with a margin, so that only the lines between symbols are left
         #(an unfilled symbol was found by the space inside its outline, so its outline is a line's width further out)
-        pad = 2*line_width + int(0.1*max(w, h)) + (line_width if phenotype == 1 else 0)
+        pad = (2 if phenotype == 1 else 1)*line_width + int(0.05*max(w, h))
+        IndvIDsDict[label]['pad'] = pad
         nodeless_img = cv2.rectangle(nodeless_img, (x-pad, y-pad), (x+w+pad, y+h+pad), (255,255,255), -1)
 
     unmatched = [label for label in IndvIDsDict if 'node_coords' not in IndvIDsDict[label]]

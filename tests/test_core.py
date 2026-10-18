@@ -15,9 +15,9 @@ SYMBOL = 40   # the width of a symbol, in pixels
 COLUMNS = ['IndividualID', 'PaternalID', 'MaternalID', 'Sex', 'Phenotype']
 
 
-def draw_pedigree(path, people, couples, size, **save_options):
+def draw_pedigree(path, people, couples, size, symbol=SYMBOL, line=3, **save_options):
     '''
-    Draws a pedigree in the usual style, in black on white.
+    Draws a pedigree in the usual style, in black on white, with symbols symbol pixels across and lines line pixels wide.
     people: id -> (x, y, sex 'M', 'F' or 'U', affected), with (x, y) the middle of the person's symbol
     couples: (partner drawn on the left, partner drawn on the right, [children])
     '''
@@ -27,28 +27,28 @@ def draw_pedigree(path, people, couples, size, **save_options):
         pytest.skip('needs the DejaVu Sans font to draw the labels')
     image = Image.new('RGB', size, 'white')
     draw = ImageDraw.Draw(image)
-    half = SYMBOL / 2
+    half = symbol / 2
     for left, right, children in couples:
         lx, ly = people[left][:2]
         rx, ry = people[right][:2]
-        draw.line([(lx + half, ly), (rx - half, ry)], fill='black', width=3)
+        draw.line([(lx + half, ly), (rx - half, ry)], fill='black', width=line)
         middle = (lx + rx) / 2
         sibship = people[children[0]][1] - half - 30
-        draw.line([(middle, ly), (middle, sibship)], fill='black', width=3)
+        draw.line([(middle, ly), (middle, sibship)], fill='black', width=line)
         xs = [people[child][0] for child in children] + [middle]
-        draw.line([(min(xs), sibship), (max(xs), sibship)], fill='black', width=3)
+        draw.line([(min(xs), sibship), (max(xs), sibship)], fill='black', width=line)
         for child in children:
             cx, cy = people[child][:2]
-            draw.line([(cx, sibship), (cx, cy - half)], fill='black', width=3)
+            draw.line([(cx, sibship), (cx, cy - half)], fill='black', width=line)
     for person, (x, y, sex, affected) in people.items():
         box = [x - half, y - half, x + half, y + half]
         fill = 'black' if affected else 'white'
         if sex == 'M':
-            draw.rectangle(box, outline='black', width=3, fill=fill)
+            draw.rectangle(box, outline='black', width=line, fill=fill)
         elif sex == 'F':
-            draw.ellipse(box, outline='black', width=3, fill=fill)
+            draw.ellipse(box, outline='black', width=line, fill=fill)
         else:
-            draw.polygon([(x, y - half), (x + half, y), (x, y + half), (x - half, y)], outline='black', width=3, fill=fill)
+            draw.polygon([(x, y - half), (x + half, y), (x, y + half), (x - half, y)], outline='black', width=line, fill=fill)
         draw.text((x, y + half + 8), str(person), fill='black', font=font, anchor='mt')
     image.save(path, **save_options)
 
@@ -109,6 +109,18 @@ def test_two_generations(two_generations):
                            ['202', '101', '102', '2', '1']]
     # the enlarged image is kept in memory, and nothing is written next to the original
     assert os.listdir(two_generations) == ['FAMC.png']
+
+
+@needs_tesseract
+@pytest.mark.parametrize('symbol, line', [(24, 3), (40, 6)])
+def test_thick_lines_or_small_symbols(tmp_path, symbol, line):
+    # the margin blanked out round each symbol grows with the lines' width: the lines must still reach the symbols
+    draw_pedigree(tmp_path / 'FAMC.png', *TWO_GENERATIONS, symbol=symbol, line=line)
+    df = pedigree_processing('FAMC', raw_image_dir=str(tmp_path))
+    assert as_rows(df) == [['101', '0', '0', '1', '2'],
+                           ['102', '0', '0', '2', '1'],
+                           ['201', '101', '102', '1', '2'],
+                           ['202', '101', '102', '2', '1']]
 
 
 @needs_tesseract
@@ -223,6 +235,14 @@ def test_merging_lines():
     # a line inside another, even sharing an end, is the same line, and lines that meet end to end are joined
     assert merged['horizontal'] == [(100, 500, 900, 500), (100, 900, 300, 900)]
     assert merged['vertical'] == [(100, 900, 100, 300), (2000, 900, 2000, 300)]
+
+
+@pytest.mark.parametrize('order', [(0, 1, 2), (2, 1, 0), (0, 2, 1), (1, 0, 2)])
+def test_merging_lines_in_any_order(order):
+    # the third piece joins the other two, which don't touch each other
+    pieces = [(100, 500, 300, 500), (600, 500, 900, 500), (250, 500, 650, 500)]
+    merged = merge_duplicate_lines({'horizontal': [pieces[i] for i in order], 'vertical': []})
+    assert merged['horizontal'] == [(100, 500, 900, 500)]
 
 
 def test_line_width():
