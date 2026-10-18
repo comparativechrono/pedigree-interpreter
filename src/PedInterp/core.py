@@ -268,7 +268,7 @@ def open_with_disc(mask, radius):
         return np.zeros_like(mask)
     outside_core = cv2.compare(distance, radius, cv2.CMP_LE)
     #dilation: the places within the radius of the core
-    cv2.distanceTransform(outside_core, cv2.DIST_L2, cv2.DIST_MASK_PRECISE, dst= distance)
+    distance = cv2.distanceTransform(outside_core, cv2.DIST_L2, cv2.DIST_MASK_PRECISE, dst= distance)
     del outside_core
     opened = cv2.compare(distance, radius, cv2.CMP_LE)
     del distance
@@ -282,11 +282,17 @@ def detect_symbols(gray_img, img_area):
     unfilled (unaffected) symbols from the white space inside their outlines.
 
     The holes in the letters and numbers of any labels left in the drawing (in 0, 6, 8, 9, A, B, D and so on) are
-    white space inside an outline too, but they are much smaller than the symbols. So anything less than three line
-    widths across is left out, and so is anything less than 0.4 times the size of a typical symbol: the median size
-    of the filled symbols, which text never passes for, or if none is filled, the size that nine in ten of the
-    shapes found are smaller than. The three line widths aren't enough on their own, as the lines of a drawing can
+    white space inside an outline too, but they are much smaller than the symbols. Each shape is measured outline
+    and all: an unfilled symbol is found by the white inside it, so the width of the outline round that white is
+    added on either side (and for a hole in a letter, the width of the letter's stroke).
+    Anything less than half the size of a typical symbol is then left out: the median size of the filled symbols,
+    which text never passes for, or if none is filled, the size that nine in ten of the shapes found are smaller
+    than. So is anything less than three line widths across, which alone wouldn't do, as the lines of a drawing can
     be much thinner than the strokes of its text.
+
+    Shapes that overlap are one symbol: a slash through the symbol of someone who has died cuts the white inside
+    it in two, and the two pieces are joined again, the symbol's shape taken from the hull around both. A small
+    shape inside a larger one of the other kind, such as a carrier's dot, is left out.
 
     RETURN:
     -------
@@ -304,7 +310,6 @@ def detect_symbols(gray_img, img_area):
 
     _, threshold_light = cv2.threshold(gray_img, 250, 255, cv2.THRESH_BINARY)
     light_contours, hierarchy = cv2.findContours(threshold_light, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    del threshold_light
 
     #the white inside an outline is a patch of white of its own, whose edge is an outer contour, at an even depth in
     #the tree of contours. The contours at odd depths are the edges of dark shapes seen from the white around them:
@@ -327,18 +332,78 @@ def detect_symbols(gray_img, img_area):
             x,y,w,h = cv2.boundingRect(approx)
             bounding_area = w*h
             if bounding_area < 0.25*img_area and bounding_area > 0.0001*img_area and abs(w-h) < (min(w,h) * 0.25):
-                candidates.append(((x, y, w, h), symbol_sex(contour), phenotype))
+                outline = outline_width(threshold_light, (x, y, w, h), line_width) if phenotype == 1 else 0
+                candidates.append({'box': (x, y, w, h), 'contours': [contour], 'phenotype': phenotype,
+                                   'size': max(w, h), 'outer': max(w, h) + 2*outline})
+    del threshold_light
     if not candidates:
         return [], line_width
 
     #leaving out the holes in text. Labels can have more holes than there are symbols, so when no symbol is filled,
     #the typical symbol is one bigger than nine in ten of what was found
-    sizes = [max(w, h) for (_, _, w, h), _, _ in candidates]
-    filled_sizes = [size for size, (_, _, phenotype) in zip(sizes, candidates) if phenotype == 2]
+    sizes = [c['outer'] for c in candidates]
+    filled_sizes = [c['outer'] for c in candidates if c['phenotype'] == 2]
     typical = float(np.median(filled_sizes)) if filled_sizes else float(np.percentile(sizes, 90))
-    smallest = max(3*line_width, 0.4*typical)
-    symbols = [candidate for size, candidate in zip(sizes, candidates) if size >= smallest]
+    candidates = [c for c in candidates if c['outer'] >= max(3*line_width, 0.5*typical)]
+    symbols = [(c['box'], symbol_sex(c['contours'][0] if len(c['contours']) == 1
+                                     else cv2.convexHull(np.vstack(c['contours']))), c['phenotype'])
+               for c in join_overlapping(candidates)]
     return symbols, line_width
+
+def outline_width(light_mask, box, line_width):
+    '''
+    The width of the outline round the white inside a symbol (or the stroke round a hole in a letter): the longest
+    run of dark pixels outwards from the middle of a side of the white's box, but no more than two line widths. The
+    longest, because blanking out a label can cut into the outline on one side; no more than two line widths,
+    because a line meeting the symbol makes the run on that side longer.
+    '''
+    x, y, w, h = box
+    height, width = light_mask.shape[:2]
+    cap = 2*line_width
+
+    def inside(px, py):
+        return 0 <= px < width and 0 <= py < height
+
+    runs = []
+    for (px, py), (dx, dy) in (((x + w//4, y + h//2), (-1, 0)), ((x + 3*w//4, y + h//2), (1, 0)),
+                               ((x + w//2, y + h//4), (0, -1)), ((x + w//2, y + 3*h//4), (0, 1))):
+        #from inside the white (the box of a simplified outline can fall short of it), out to its edge, then across
+        #the dark outline
+        while inside(px, py) and light_mask[py, px] != 0:
+            px, py = px + dx, py + dy
+        run = 0
+        while run < cap and inside(px, py) and light_mask[py, px] == 0:
+            run += 1
+            px, py = px + dx, py + dy
+        runs.append(run)
+    return max(runs)
+
+def join_overlapping(candidates):
+    '''
+    Joins candidates whose boxes overlap: those of the same kind (filled or not) into one, with the box round them
+    all, and of different kinds by keeping the larger
+    '''
+    def overlap(a, b):
+        ax, ay, aw, ah = a['box']
+        bx, by, bw, bh = b['box']
+        return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+
+    joined = []
+    for c in sorted(candidates, key= lambda c: -c['size']):
+        for kept in joined:
+            if overlap(c, kept):
+                if c['phenotype'] == kept['phenotype']:
+                    kx, ky, kw, kh = kept['box']
+                    cx, cy, cw, ch = c['box']
+                    left, top = min(kx, cx), min(ky, cy)
+                    right, bottom = max(kx + kw, cx + cw), max(ky + kh, cy + ch)
+                    kept['box'] = (left, top, right - left, bottom - top)
+                    kept['contours'].extend(c['contours'])
+                    kept['size'] = max(right - left, bottom - top)
+                break
+        else:
+            joined.append(c)
+    return joined
 
 def erase_loose_marks(binary_img, boxes):
     '''
@@ -707,11 +772,13 @@ def pedigree_processing(FamID,
         IndvIDsDict[IDs[i]] = {'node_coords': (x,y,w,h), 'Phenotype': phenotype, 'Sex': sex, 'pad': pad}
 
     #clearing away any text left in the drawing (all of it, when the labels aren't read) and any stray marks: whatever
-    #doesn't reach a symbol's outline, which is within a line's width of the box found for the symbol. (The margin
-    #blanked out is wider, and with thick lines it can reach the label under a symbol)
-    nodeless_img = erase_loose_marks(np.copy(redacted_img),
-                                     [(x - line_width, y - line_width, x + w + line_width, y + h + line_width)
-                                      for (x, y, w, h), _, _ in symbols])
+    #doesn't come near enough a symbol for the lines to be traced from it. A line is traced from the top of a symbol
+    #and from its sides, up to half the symbol's height beyond the margin blanked out round it, so a line that stops
+    #short of the symbol is kept as long as the tracing would reach it. Lines don't meet a symbol from below, where its
+    #label usually is, so below a symbol only what touches its outline is kept
+    reach = [(x - person['pad'] - h/2, y - person['pad'] - h/2, x + w + person['pad'] + h/2, y + h + line_width)
+             for person in IndvIDsDict.values() for x, y, w, h in [person['node_coords']]]
+    nodeless_img = erase_loose_marks(np.copy(redacted_img), reach)
     #then blanking out the symbols
     for person in IndvIDsDict.values():
         x, y, w, h = person['node_coords']
@@ -734,6 +801,8 @@ def pedigree_processing(FamID,
     cat_norm_lines = categorize_normalize_lines(raw_lines, img_width, img_height)
 
     lines = merge_duplicate_lines(cat_norm_lines)
+    if len(symbols) > 1 and not (lines['vertical'] or lines['horizontal']):
+        warnings.warn(f'No lines were found between the symbols in {image_path}, so no one\'s parents are known')
     for direction in lines.keys():
         for line in lines[direction]:
             x1, y1, x2, y2 = line

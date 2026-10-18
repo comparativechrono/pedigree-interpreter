@@ -65,7 +65,7 @@ Some things aren't read yet:
 
 - **labels of a single character**, which Tesseract seldom picks out. Labels of two or more characters, such as 12 or 101, are read well, but labels with Roman numerals, such as II-3, are often misread. Anyone whose label isn't read is given an ID from their place in the drawing instead, with a warning (see [When only some labels are read](#when-only-some-labels-are-read))
 - **half-filled, shaded or hatched symbols**, such as those used for carriers. A half-filled symbol is left out. When the labels are read, a warning names its label, but when the people are numbered nothing shows that it was missed, and the others in its row are numbered as if it weren't there. The drawing is made black and white before the symbols are looked for, so a shaded symbol is read as filled if the shading is dark and as empty if it's light, and a hatched one as empty
-- **a slash through the symbol of an unaffected person who has died**, which splits the symbol in two, so the person's sex may be misread
+- **a slash through the symbol of an unaffected person who has died**, which splits the white inside the symbol in two. The two pieces are joined again, and the symbol's shape is taken from the outline round both, but a slash at an odd angle can still lead to the sex being misread
 - **lines that slope**, as for twins, which are left out with a warning
 
 OCR can misread a label (a 5 as a 3, say), so it's worth checking the table against the drawing.
@@ -86,8 +86,9 @@ People are numbered in the usual way for pedigrees. Each row of symbols, from th
 
 When the labels aren't read they are still in the drawing, so PedInterp keeps them from being taken for symbols or lines:
 
-- the holes in letters and numbers (in 0, 6, 8, 9, A, B, D and so on) are white space inside an outline, like the inside of an unfilled symbol, but much smaller. Nothing less than three line widths across is taken for a symbol, and nor is anything less than 0.4 times the size of a typical symbol. The typical symbol is the median filled one, as text is never taken for a filled symbol, or, if none is filled, a size that nine in ten of the shapes found are smaller than. Line widths alone wouldn't do, as the lines of a drawing can be much thinner than the strokes of its text
-- once the symbols have been found, every dark mark that doesn't reach a symbol's outline is cleared away before the lines are looked for. The lines all touch symbols, so they stay, while labels and stray marks go
+- the holes in letters and numbers (in 0, 6, 8, 9, A, B, D and so on) are white space inside an outline, like the inside of an unfilled symbol, but much smaller. Each shape is measured with its outline: an unfilled symbol is found by the white inside it, so the width of its outline is added on either side (for a hole in a letter, the width of the letter's stroke). Nothing less than half the size of a typical symbol is then taken for a symbol, and nor is anything less than three line widths across. The typical symbol is the median filled one, as text is never taken for a filled symbol, or, if none is filled, a size that nine in ten of the shapes found are smaller than. Line widths alone wouldn't do, as the lines of a drawing can be much thinner than the strokes of its text
+- once the symbols have been found, every dark mark that couldn't be a line to a symbol is cleared away before the lines are looked for: whatever doesn't come within reach of the top or the sides of a symbol, where lines meet it. The reach is as far as the lines are traced from a symbol, so a line that stops a little short of a symbol stays, while labels under the symbols and stray marks go. If no lines are left between the symbols, a warning says so
+- shapes that overlap are taken as one symbol, so the two pieces of a symbol cut by a slash count once, and a small shape inside a larger one of the other kind, such as a carrier's dot, is left out
 
 Both are done when the labels are read as well, as OCR can miss some.
 

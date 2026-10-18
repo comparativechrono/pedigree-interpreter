@@ -21,12 +21,14 @@ SYMBOL = 40   # the width of a symbol, in pixels
 COLUMNS = ['IndividualID', 'PaternalID', 'MaternalID', 'Sex', 'Phenotype']
 
 
-def draw_pedigree(path, people, couples, size, symbol=SYMBOL, line=3, labels=True, **save_options):
+def draw_pedigree(path, people, couples, size, symbol=SYMBOL, line=3, labels=True, gap=0, slash=(), **save_options):
     '''
     Draws a pedigree in the usual style, in black on white, with symbols symbol pixels across and lines line pixels wide.
     people: id -> (x, y, sex 'M', 'F' or 'U', affected), with (x, y) the middle of the person's symbol
     couples: (partner drawn on the left, partner drawn on the right, [children])
     labels: whether to write each person's id under their symbol
+    gap: how far short of the symbols the lines stop
+    slash: the people whose symbols have a slash through them, as for someone who has died
     '''
     if labels:
         try:
@@ -39,7 +41,7 @@ def draw_pedigree(path, people, couples, size, symbol=SYMBOL, line=3, labels=Tru
     for left, right, children in couples:
         lx, ly = people[left][:2]
         rx, ry = people[right][:2]
-        draw.line([(lx + half, ly), (rx - half, ry)], fill='black', width=line)
+        draw.line([(lx + half + gap, ly), (rx - half - gap, ry)], fill='black', width=line)
         middle = (lx + rx) / 2
         sibship = people[children[0]][1] - half - 30
         draw.line([(middle, ly), (middle, sibship)], fill='black', width=line)
@@ -47,7 +49,7 @@ def draw_pedigree(path, people, couples, size, symbol=SYMBOL, line=3, labels=Tru
         draw.line([(min(xs), sibship), (max(xs), sibship)], fill='black', width=line)
         for child in children:
             cx, cy = people[child][:2]
-            draw.line([(cx, sibship), (cx, cy - half)], fill='black', width=line)
+            draw.line([(cx, sibship), (cx, cy - half - gap)], fill='black', width=line)
     for person, (x, y, sex, affected) in people.items():
         box = [x - half, y - half, x + half, y + half]
         fill = 'black' if affected else 'white'
@@ -59,6 +61,8 @@ def draw_pedigree(path, people, couples, size, symbol=SYMBOL, line=3, labels=Tru
             draw.polygon([(x, y - half), (x + half, y), (x, y + half), (x - half, y)], outline='black', width=line, fill=fill)
         if labels:
             draw.text((x, y + half + 8), str(person), fill='black', font=font, anchor='mt')
+        if person in slash:
+            draw.line([(x - half - 6, y + half + 6), (x + half + 6, y - half - 6)], fill='black', width=line)
     image.save(path, **save_options)
 
 
@@ -465,3 +469,35 @@ def test_erasing_loose_marks():
     erase_loose_marks(image, [(5, 35, 35, 65)])
     assert (image[40:60, 10:30] == 0).all() and (image[49:51, 30:200] == 0).all()
     assert (image[40:60, 250:260] == 255).all()
+
+
+# Drawings that the steps for reading without Tesseract must not make worse
+
+@pytest.mark.parametrize('gap', [4, 6])
+def test_lines_that_stop_short_of_the_symbols(tmp_path, gap):
+    # the lines stop a little short of the symbols: they must be kept, not cleared away as stray marks
+    people, couples, size = THREE_GENERATIONS
+    draw_pedigree(tmp_path / 'pedigree.png', *THREE_GENERATIONS, gap=gap)
+    df = pedigree_processing('FAMG', image_path=str(tmp_path / 'pedigree.png'), ocr=fake_ocr(people, size))
+    assert as_rows(df) == THREE_GENERATIONS_READ
+
+
+@pytest.mark.parametrize('symbol,line', [(40, 9), (34, 7), (30, 6)])
+def test_bold_lines(tmp_path, symbol, line):
+    # an unfilled symbol is found by the white inside it, which thick lines make much smaller than the symbol
+    people, couples, size = THREE_GENERATIONS
+    draw_pedigree(tmp_path / 'pedigree.png', *THREE_GENERATIONS, symbol=symbol, line=line, labels=False)
+    df = pedigree_processing('FAMB', image_path=str(tmp_path / 'pedigree.png'), ocr=None)
+    rows = as_rows(df)
+    # everyone is found, affected or not. (The sex of a filled symbol drawn with lines this thick can still be
+    # misread, as before: the corners of a filled square are worn away with the lines)
+    assert [row[4] for row in rows] == [row[4] for row in THREE_GENERATIONS_NUMBERED]
+    assert [row[3] for row in rows if row[4] == '1'] == [row[3] for row in THREE_GENERATIONS_NUMBERED if row[4] == '1']
+
+
+def test_a_slash_through_a_symbol(tmp_path):
+    # a slash cuts the white inside 102's circle in two: one woman, not two people
+    people, couples, size = THREE_GENERATIONS
+    draw_pedigree(tmp_path / 'pedigree.png', *THREE_GENERATIONS, slash=(102,))
+    df = pedigree_processing('FAMS', image_path=str(tmp_path / 'pedigree.png'), ocr=fake_ocr(people, size))
+    assert as_rows(df) == THREE_GENERATIONS_READ
