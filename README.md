@@ -49,6 +49,17 @@ The image is enlarged in memory, so nothing is written next to it.
 
 **`PED_export(PED_df, output_dir='.')`** writes a DataFrame from `pedigree_processing` as a PED file, named after the family ID in its first row (`output_dir/<FamilyID>.ped`), and returns the file's path.
 
+## From the command line
+
+Installing PedInterp also installs the `pedinterp` command, which reads a picture of a pedigree and writes the PED file:
+
+```bash
+pedinterp FAM1.png -d ped                  # writes ped/FAM1.ped
+pedinterp scan.jpg -f FAM2 --labels none   # numbers the people rather than reading their labels
+```
+
+The family ID is the picture's name without its ending, unless `-f` gives another, and the PED file is named after it. The table is printed too, unless `-q` is given. `--upscale` does what `upscale_factor` does, and `--labels none` what `ocr=None` does. If the picture can't be read, or has no pedigree in it, the command says why and exits with status 1; warnings, such as one for a label that wasn't matched to a symbol, are printed without stopping it. `pedinterp --help` lists the options.
+
 ## What PedInterp expects of a drawing
 
 PedInterp reads pedigrees drawn in the usual way, in black on white:
