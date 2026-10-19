@@ -169,7 +169,7 @@ The lines between the symbols can be missed: most often when the picture is enla
 - the parents and children it found split the people into more than one family, as when the line up from someone who has children is missed;
 - no one has parents at all, though the symbols are in more than one row.
 
-The warning says how many times the picture was enlarged, and enlarging it a little more or less may help. Not every misreading looks like one of these, such as someone given the wrong parents, so check the table against the picture.
+The warning says how many times the picture was enlarged, and enlarging it a little more or less may help. If the lines are very thick, about a fifth of a symbol's width, enlarge it less: an unfilled symbol is measured by the white inside it, which such lines make much smaller than the symbol, so the picture is enlarged more than it needs. Not every misreading looks like one of these, such as someone given the wrong parents, so check the table against the picture.
 
 ### Checking PedInterp under Pyodide
 
