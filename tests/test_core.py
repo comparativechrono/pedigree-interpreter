@@ -10,9 +10,11 @@ import pandas as pd
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
+import PedInterp.core as core
 from PedInterp import PED_export, pedigree_processing
-from PedInterp.core import (categorize_normalize_lines, detect_symbols, erase_loose_marks, generation_id,
-                            generation_places, merge_duplicate_lines, roman_numeral, stroke_width)
+from PedInterp.core import (SYMBOL_PIXELS, categorize_normalize_lines, choose_upscale, detect_symbols,
+                            erase_loose_marks, generation_id, generation_places, merge_duplicate_lines, roman_numeral,
+                            stroke_width)
 
 needs_tesseract = pytest.mark.skipif(shutil.which('tesseract') is None or importlib.util.find_spec('pytesseract') is None,
                                      reason='needs the Tesseract OCR engine and pytesseract')
@@ -548,3 +550,62 @@ def test_partners_on_either_side(tmp_path):
     df = pedigree_processing('FAMP', image_path=str(tmp_path / 'pedigree.png'), ocr=None)
     assert as_rows(df) == [['I-1', '0', '0', '2', '1'], ['I-2', '0', '0', '1', '2'], ['I-3', '0', '0', '2', '1'],
                            ['II-1', 'I-2', 'I-1', '1', '2'], ['II-2', 'I-2', 'I-3', '2', '1']]
+
+
+def test_enlarged_to_suit_its_symbols(tmp_path):
+    # by default a picture is enlarged so that its symbols are about SYMBOL_PIXELS across, whatever its size: one drawn
+    # three times as large is enlarged a third as much, and both are read correctly
+    draw_pedigree(tmp_path / 'small.png', *THREE_GENERATIONS, labels=False)
+    small = Image.open(tmp_path / 'small.png')
+    small.resize((small.width * 3, small.height * 3), Image.LANCZOS).save(tmp_path / 'large.png')
+    factors = [choose_upscale(str(tmp_path / name)) for name in ('small.png', 'large.png')]
+    assert 0.7 * SYMBOL_PIXELS < factors[0] * SYMBOL < 1.3 * SYMBOL_PIXELS
+    assert factors[1] == pytest.approx(factors[0] / 3, rel=0.1)
+    for name, factor in zip(('small.png', 'large.png'), factors):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            df = pedigree_processing('FAMS', image_path=str(tmp_path / name), ocr=None)
+        assert as_rows(df) == THREE_GENERATIONS_NUMBERED and df.attrs['upscale_factor'] == factor
+
+
+def test_never_enlarged_past_max_pixels(tmp_path, monkeypatch):
+    draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
+    width, height = Image.open(tmp_path / 'p.png').size
+    monkeypatch.setattr(core, 'MAX_PIXELS', 4 * width * height)
+    assert choose_upscale(str(tmp_path / 'p.png')) <= 2
+
+
+def test_a_picture_without_symbols_is_enlarged_to_5000_pixels(tmp_path):
+    Image.new('RGB', (1000, 600), 'white').save(tmp_path / 'blank.png')
+    assert choose_upscale(str(tmp_path / 'blank.png')) == 5
+
+
+@pytest.mark.parametrize('factor, warned', [(1, "No one's parents were found, though the symbols are in 3 rows"),
+                                            (2, 'joined to no one')])
+def test_missed_lines_are_warned(tmp_path, factor, warned):
+    # enlarged too little, this drawing loses some of its lines: a warning says so, and how much it was enlarged
+    draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
+    with pytest.warns(UserWarning, match=warned) as caught:
+        pedigree_processing('FAMW', image_path=str(tmp_path / 'p.png'), ocr=None, upscale_factor=factor)
+    assert any(f'enlarged {factor} times' in str(w.message) for w in caught)
+
+
+def test_one_parent_is_warned(tmp_path, monkeypatch):
+    # as when the line to one partner is missed
+    real = core.trackRelation
+
+    def lose_a_mother(lines, people):
+        people, connections = real(lines, people)
+        people['III-1']['MaternalID'] = 0
+        return people, connections
+
+    monkeypatch.setattr(core, 'trackRelation', lose_a_mother)
+    draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
+    with pytest.warns(UserWarning, match='III-1: only a father was found'):
+        pedigree_processing('FAMW', image_path=str(tmp_path / 'p.png'), ocr=None)
+
+
+def test_no_symbols_suggests_cutting_the_picture_down(tmp_path):
+    Image.new('RGB', (400, 300), 'white').save(tmp_path / 'blank.png')
+    with pytest.raises(ValueError, match='cut the picture down to the pedigree'):
+        pedigree_processing('FAMB', image_path=str(tmp_path / 'blank.png'), ocr=None)
