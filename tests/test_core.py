@@ -501,3 +501,50 @@ def test_a_slash_through_a_symbol(tmp_path):
     draw_pedigree(tmp_path / 'pedigree.png', *THREE_GENERATIONS, slash=(102,))
     df = pedigree_processing('FAMS', image_path=str(tmp_path / 'pedigree.png'), ocr=fake_ocr(people, size))
     assert as_rows(df) == THREE_GENERATIONS_READ
+
+
+# Families laid out as Pedigree Studio lays them out: each child straight under a parent, and the generations close
+# together. Hough carries a line on across gaps, the blank where a symbol was taken out among them, so the line down to
+# a child was joined to the line down to the parent drawn above them, and the child was given their grandparents
+
+# the Lynch family of the pedigree practical, where the Studio draws it, with slashes for those who have died
+LYNCH = ({101: (491, 60, 'M', True), 102: (595, 60, 'F', False),
+          201: (218, 190, 'F', False), 202: (322, 190, 'M', True), 203: (764, 190, 'M', True), 204: (868, 190, 'F', False),
+          301: (62, 320, 'M', False), 302: (166, 320, 'F', True), 303: (296, 320, 'F', True), 304: (504, 320, 'F', False),
+          305: (608, 320, 'M', False), 306: (764, 320, 'M', False), 307: (894, 320, 'M', False), 308: (998, 320, 'F', False),
+          401: (62, 450, 'F', False), 402: (166, 450, 'F', False), 403: (504, 450, 'F', False), 404: (608, 450, 'F', False),
+          405: (894, 450, 'F', False), 406: (998, 450, 'M', False)},
+         [(101, 102, [202, 203]), (201, 202, [302, 303, 304]), (203, 204, [306, 307]),
+          (301, 302, [401, 402]), (304, 305, [403, 404]), (307, 308, [405, 406])], (1060, 520))
+LYNCH_DIED = (101, 102, 202, 302)
+LYNCH_NUMBERED = [['I-1', '0', '0', '1', '2'], ['I-2', '0', '0', '2', '1'],
+                  ['II-1', '0', '0', '2', '1'], ['II-2', 'I-1', 'I-2', '1', '2'],
+                  ['II-3', 'I-1', 'I-2', '1', '2'], ['II-4', '0', '0', '2', '1'],
+                  ['III-1', '0', '0', '1', '1'], ['III-2', 'II-2', 'II-1', '2', '2'],
+                  ['III-3', 'II-2', 'II-1', '2', '2'], ['III-4', 'II-2', 'II-1', '2', '1'],
+                  ['III-5', '0', '0', '1', '1'], ['III-6', 'II-3', 'II-4', '1', '1'],
+                  ['III-7', 'II-3', 'II-4', '1', '1'], ['III-8', '0', '0', '2', '1'],
+                  ['IV-1', 'III-1', 'III-2', '2', '1'], ['IV-2', 'III-1', 'III-2', '2', '1'],
+                  ['IV-3', 'III-5', 'III-4', '2', '1'], ['IV-4', 'III-5', 'III-4', '2', '1'],
+                  ['IV-5', 'III-7', 'III-8', '2', '1'], ['IV-6', 'III-7', 'III-8', '1', '1']]
+
+
+@pytest.mark.parametrize('slash', [(), LYNCH_DIED])
+@pytest.mark.parametrize('labels', [True, False])
+def test_children_drawn_under_their_parents(tmp_path, slash, labels):
+    draw_pedigree(tmp_path / 'lynch.png', *LYNCH, slash=slash, labels=labels)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', UserWarning)
+        df = pedigree_processing('LYNCH', image_path=str(tmp_path / 'lynch.png'), ocr=None)
+    assert as_rows(df) == LYNCH_NUMBERED
+
+
+def test_partners_on_either_side(tmp_path):
+    # a man with a partner on each side, and a child with each: the lines to the two partners are not one line
+    people = {101: (300, 70, 'F', False), 102: (460, 70, 'M', True), 103: (620, 70, 'F', False),
+              201: (380, 250, 'M', True), 202: (540, 250, 'F', False)}
+    couples = [(101, 102, [201]), (102, 103, [202])]
+    draw_pedigree(tmp_path / 'pedigree.png', people, couples, (1000, 400), labels=False)
+    df = pedigree_processing('FAMP', image_path=str(tmp_path / 'pedigree.png'), ocr=None)
+    assert as_rows(df) == [['I-1', '0', '0', '2', '1'], ['I-2', '0', '0', '1', '2'], ['I-3', '0', '0', '2', '1'],
+                           ['II-1', 'I-2', 'I-1', '1', '2'], ['II-2', 'I-2', 'I-3', '2', '1']]
