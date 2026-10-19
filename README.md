@@ -42,7 +42,7 @@ PED_export(df, output_dir='ped')                            # writes ped/FAM1.pe
 - **export** (bool): whether to write the PED file as well, as `output_dir/<FamID>.ped` (default: False)
 - **output_dir** (string): the folder to write the PED file in, made if it doesn't exist (default: the working directory)
 - **image_path** (string): the image to read, in place of `raw_image_dir/<FamID>.png`. Any format Pillow opens will do, JPEG included
-- **upscale_factor** (number): how many times to enlarge the image before reading it. The distances that lines are traced and joined over are set in pixels, and suit symbols about 200 pixels across (`SYMBOL_PIXELS`), so by default PedInterp measures the symbols in a small copy of the image and enlarges it by as much as makes them that size (`choose_upscale(image_path)` gives the factor, and the result records it in `df.attrs['upscale_factor']`). A pedigree cut from a paper may be enlarged ten times or more, and a scan or a photograph much less, or even made smaller, which is quicker and takes less memory. The enlarged image never has more than 60 million pixels (`MAX_PIXELS`)
+- **upscale_factor** (number): how many times to enlarge the image before reading it. The distances that lines are traced and joined over are set in pixels, and suit symbols about 200 pixels across (`SYMBOL_PIXELS`), so by default PedInterp measures the symbols in a copy of the image 2,000 pixels across on its longer side, and enlarges the image by as much as makes them that size (`choose_upscale(image_path)` gives the factor, rounded down to one decimal place, and the result records it in `df.attrs['upscale_factor']`). A pedigree cut from a paper may be enlarged ten times or more, and a scan or a photograph much less, or even made smaller, which is quicker and takes less memory. The factor is kept between 0.25 and 20, and the enlarged image never has more than 60 million pixels (`MAX_PIXELS`). When a limit keeps it well short of what the symbols need, a warning says so: a larger copy of a very small picture would read better, and a page with a small pedigree on it should be cut down to the pedigree
 - **ocr**: how to read the labels (default: `'tesseract'`). `None` or `'none'` numbers the people instead, and a function can read the labels with other OCR. See [Without Tesseract, and in a browser](#without-tesseract-and-in-a-browser)
 
 The image is enlarged in memory, so nothing is written next to it.
@@ -162,7 +162,14 @@ Reading a drawing takes a few seconds, and a good deal of memory for a large one
 
 ### What a missed line looks like
 
-The lines between the symbols can be missed: most often when the picture is enlarged too little, or far too much, and with lines much bolder than the symbols' outlines. PedInterp then warns, rather than writing a PED file that looks right but isn't, when someone has only one parent; when someone below the top row has neither parents nor children (unless they are a partner with no children, whom a PED file can't join to anyone); and when no one has parents at all, though the symbols are in more than one row. The warning says how many times the picture was enlarged, and enlarging it a little more or less may help.
+The lines between the symbols can be missed: most often when the picture is enlarged too little, or far too much, and with lines much bolder than the symbols' outlines. PedInterp warns (`missed_lines`) when what it read looks like a missed line:
+
+- someone has only one parent;
+- someone below the top row has no parents, no children and no partners' line to them;
+- the parents and children it found split the people into more than one family, as when the line up from someone who has children is missed;
+- no one has parents at all, though the symbols are in more than one row.
+
+The warning says how many times the picture was enlarged, and enlarging it a little more or less may help. Not every misreading looks like one of these, such as someone given the wrong parents, so check the table against the picture.
 
 ### Checking PedInterp under Pyodide
 
