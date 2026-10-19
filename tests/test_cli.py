@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 
@@ -5,7 +6,7 @@ import pandas as pd
 import pytest
 from PIL import Image
 
-from PedInterp import PED_export, pedigree_processing
+from PedInterp import GA4GH_export, PED_export, pedigree_processing
 from PedInterp.cli import main
 from test_core import (COLUMNS, THREE_GENERATIONS, THREE_GENERATIONS_NUMBERED, TWO_GENERATIONS,
                        TWO_GENERATIONS_NUMBERED, draw_pedigree, needs_tesseract)
@@ -25,6 +26,37 @@ def test_writes_what_the_python_functions_write(tmp_path, capsys):
     out = capsys.readouterr().out
     assert 'IndividualID' in out and 'III-3' in out
     assert out.strip().endswith(f"wrote {tmp_path / 'cli' / 'FAMP.ped'}")
+
+
+def without_times(doc):
+    # a GA4GH file as written, but for when
+    doc = dict(doc, date=None)
+    doc['individuals'] = [dict(i, metaData=dict(i['metaData'], created=None)) for i in doc['individuals']]
+    return doc
+
+
+def test_ga4gh(tmp_path, capsys):
+    # --ga4gh writes a GA4GH Pedigree too, as GA4GH_export does, with the condition given
+    draw_pedigree(tmp_path / 'FAMP.png', *THREE_GENERATIONS, labels=False)
+    assert main([str(tmp_path / 'FAMP.png'), '-d', str(tmp_path / 'cli'), '--labels', 'none', '-q', '--ga4gh',
+                 '--condition', 'MONDO:0007739', 'Huntington disease']) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == f"wrote {tmp_path / 'cli'}/FAMP_ga4gh-pedigree.json"
+    df = pedigree_processing('FAMP', image_path=str(tmp_path / 'FAMP.png'), ocr=None)
+    expected = GA4GH_export(df, str(tmp_path / 'python'), condition=('MONDO:0007739', 'Huntington disease'))
+    doc = json.loads((tmp_path / 'cli' / 'FAMP_ga4gh-pedigree.json').read_text())
+    assert without_times(doc) == without_times(json.load(open(expected)))
+    assert (tmp_path / 'cli' / 'FAMP.ped').exists()
+
+
+def test_condition_errors(tmp_path, capsys):
+    # --condition belongs to --ga4gh, and must be a term a GA4GH file can name; nothing is read or written otherwise
+    draw_pedigree(tmp_path / 'FAMP.png', *TWO_GENERATIONS, labels=False)
+    out = tmp_path / 'out'
+    assert main([str(tmp_path / 'FAMP.png'), '--labels', 'none', '-d', str(out), '--condition', 'MONDO:0007739', 'HD']) == 1
+    assert '--ga4gh' in capsys.readouterr().err
+    assert main([str(tmp_path / 'FAMP.png'), '--labels', 'none', '-d', str(out), '--ga4gh', '--condition', 'HD', 'Huntington']) == 1
+    assert 'ontology term' in capsys.readouterr().err
+    assert not out.exists()
 
 
 def test_family_named_after_the_picture(tmp_path, monkeypatch, capsys):
