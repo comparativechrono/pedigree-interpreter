@@ -524,6 +524,44 @@ def categorize_normalize_lines(lines, img_width, img_height, tilt_threshold = 20
 
 
 
+def cut_at_symbols(norm_cat_lines, boxes):
+    '''
+    Cuts the lines where they cross a symbol, keeping the pieces outside. No line passes through a symbol, but Hough
+    joins the pieces of a line across gaps, and the blank left where a symbol was taken out is a gap like any other.
+    Without this, the line down to a child is joined to the line above them that leads down to their parent drawn
+    straight above them, and the child is given their grandparents; and the lines from someone to partners on either
+    side of them are joined into one, which makes the partners a couple.
+    boxes: the symbols, as (left, top, right, bottom) with the margin blanked out round them
+    '''
+    def outside(start, end, cuts):
+        pieces, at = [], start
+        for a, b in sorted(cuts):
+            if b <= at or a >= end:
+                continue
+            if a > at:
+                pieces.append((at, a))
+            at = max(at, b)
+        if at < end:
+            pieces.append((at, end))
+        return pieces
+
+    cut = {'vertical': [], 'horizontal': []}
+    #a vertical line runs from the bottom (x1, y1) up to the top (x2, y2)
+    for x1, y1, x2, y2 in norm_cat_lines['vertical']:
+        x_at = lambda y: x1 if y1 == y2 else x1 + (x2 - x1)*(y1 - y)/(y1 - y2)
+        crossed = [(top, bottom) for left, top, right, bottom in boxes if left <= max(x1, x2) and min(x1, x2) <= right]
+        for top, bottom in outside(y2, y1, crossed):
+            cut['vertical'].append((int(round(x_at(bottom))), int(bottom), int(round(x_at(top))), int(top)))
+    #a horizontal line runs from the left (x1, y1) to the right (x2, y2)
+    for x1, y1, x2, y2 in norm_cat_lines['horizontal']:
+        y_at = lambda x: y1 if x1 == x2 else y1 + (y2 - y1)*(x - x1)/(x2 - x1)
+        crossed = [(left, right) for left, top, right, bottom in boxes if top <= max(y1, y2) and min(y1, y2) <= bottom]
+        for left, right in outside(x1, x2, crossed):
+            cut['horizontal'].append((int(left), int(round(y_at(left))), int(right), int(round(y_at(right)))))
+    return cut
+
+
+
 def partners_at_ends(line, IndvID, IndvDataDict, distance_threshold):
     '''
     The people at the two ends of a horizontal line: at each end, whoever has a side of their symbol within
@@ -545,6 +583,25 @@ def partners_at_ends(line, IndvID, IndvDataDict, distance_threshold):
                     best, best_distance = PartnerID, distance
         partners.append(best)
     return partners
+
+def first_line_above(vert_line, horizontal_lines, below, distance_threshold):
+    '''
+    The horizontal line that a vertical line meets first going up from the height below: the nearest line above it
+    that the vertical line crosses or reaches (to within distance_threshold), or None. Not just the line at its top:
+    Hough can carry a line on past the line it meets, across a gap to a line further up.
+    '''
+    Vx1, Vy1, Vx2, Vy2 = vert_line
+    best, best_y = None, None
+    for horz_line in horizontal_lines:
+        Hx1, Hy1, Hx2, Hy2 = horz_line
+        Hy = (Hy1 + Hy2)/2
+        if not (Vy2 - distance_threshold < Hy < below):
+            continue
+        #where the vertical line is at that height (it may lean a little)
+        Vx = Vx1 if Vy1 == Vy2 else Vx1 + (Vx2 - Vx1)*(Vy1 - Hy)/(Vy1 - Vy2)
+        if Hx1 - distance_threshold < Vx < Hx2 + distance_threshold and (best_y is None or Hy > best_y):
+            best, best_y = horz_line, Hy
+    return best
 
 def trackRelation(normalized_categorized_lines, IndvDataDict):
     connection_lines = []
@@ -574,47 +631,34 @@ def trackRelation(normalized_categorized_lines, IndvDataDict):
         #checking if parental relationship was found
         #tracing back to parents if known
         if inheritence_known:
-            Cx,Cy = current_coord
-            endpoints = None
-            #find initial horizontal
-            for horz_line in normalized_categorized_lines['horizontal']:
-                Hx1,Hy1,Hx2,Hy2 = horz_line
-                #checking if horizontal line is at same elevation as current y and current x is between enpoints
-                if abs(Cy - Hy1) < distance_threshold and (Hx1-distance_threshold < Cx and Cx < Hx2+distance_threshold):
-                    endpoints = horz_line
-                    break
+            horizontal = normalized_categorized_lines['horizontal']
+            #(a line that Hough makes at the foot of this one, where it meets the symbol, out of the end of the line and
+            #what is left of a slash through the symbol, isn't one it leads to: the line it leads to is further up)
+            endpoints = first_line_above(vert_line, horizontal, start_coord[1] - distance_threshold/2, distance_threshold)
             if endpoints is None:
                 warnings.warn(f'{IndvID}: a line leaves the top of the symbol but leads to no other line, so the parents are unknown')
                 continue
 
             #a line with someone at each end is the partners' line, which is reached straight away from an only child,
             #or from a child drawn right under the partners' line. Otherwise this is the line over a sibship, and the
-            #partners' line is at the top of the line that comes down to it
+            #partners' line is the first line that the line coming down to it meets on the way up
             left_parent, right_parent = partners_at_ends(endpoints, IndvID, IndvDataDict, distance_threshold)
             if left_parent is None and right_parent is None:
-                #find secondary vertical (if it exists)
-                secondary_exists = False
                 Cx1,Cy1,Cx2,Cy2 = endpoints
                 for vert_line in normalized_categorized_lines['vertical']:
                     Vx1,Vy1,Vx2,Vy2 = vert_line
-                    #checks that the two lines intersect in a perpendicular way
-                    #adding distance threshold to Vy2 inorder to trncate the veritcal line from the top
-                    #this avoid seeing downward point sibling veritcal lines and progressing along that instead of parental lines
+                    #a line that crosses the sibship's line and goes on up: adding distance threshold to Vy2 leaves out
+                    #the lines that go down from it to the children. A child's line that Hough has carried on up past
+                    #it leads to no partners' line, so the lines are tried until one does
                     if (Vy1+distance_threshold > Cy1 and Cy1 > Vy2+distance_threshold) and (Cx1-distance_threshold < Vx1 and Vx1 < Cx2+distance_threshold):
-                        current_coord = (Vx2, Vy2)
-                        secondary_exists = True
-                        break
-
-                #check if secondary vertical was found
-                if secondary_exists:
-                    Cx,Cy = current_coord
-                    #find secondary horizontal
-                    for horz_line in normalized_categorized_lines['horizontal']:
-                        Hx1,Hy1,Hx2,Hy2 = horz_line
-                        if abs(Cy - Hy1) < distance_threshold and (Hx1-distance_threshold < Cx and Cx < Hx2+distance_threshold):
-                            endpoints = horz_line
+                        above = first_line_above(vert_line, horizontal, Cy1 - distance_threshold/2, distance_threshold)
+                        if above is None:
+                            continue
+                        partners = partners_at_ends(above, IndvID, IndvDataDict, distance_threshold)
+                        if partners != [None, None]:
+                            endpoints = above
+                            left_parent, right_parent = partners
                             break
-                    left_parent, right_parent = partners_at_ends(endpoints, IndvID, IndvDataDict, distance_threshold)
 
             fx1,fy1,fx2,fy2 = endpoints
             sx, sy = start_coord
@@ -799,6 +843,9 @@ def pedigree_processing(FamID,
 
     line_img = np.copy(redacted_img)*0
     cat_norm_lines = categorize_normalize_lines(raw_lines, img_width, img_height)
+    boxes = [(x - person['pad'], y - person['pad'], x + w + person['pad'], y + h + person['pad'])
+             for person in IndvIDsDict.values() for x, y, w, h in [person['node_coords']]]
+    cat_norm_lines = cut_at_symbols(cat_norm_lines, boxes)
 
     lines = merge_duplicate_lines(cat_norm_lines)
     if len(symbols) > 1 and not (lines['vertical'] or lines['horizontal']):
