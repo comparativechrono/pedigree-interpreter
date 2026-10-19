@@ -35,14 +35,14 @@ df = pedigree_processing('FAM1', raw_image_dir='images')   # reads images/FAM1.p
 PED_export(df, output_dir='ped')                            # writes ped/FAM1.ped
 ```
 
-**`pedigree_processing(FamID, raw_image_dir='.', export=False, output_dir='.', image_path=None, upscale_factor=10, ocr='tesseract')`** reads a pedigree image and returns a pandas DataFrame with the columns FamilyID, IndividualID, PaternalID, MaternalID, Sex (1 male, 2 female, 0 unknown) and Phenotype (1 unaffected, 2 affected). There is a row for each person, generation by generation, and from left to right within a generation. PaternalID and MaternalID are 0 for anyone whose parents aren't in the drawing.
+**`pedigree_processing(FamID, raw_image_dir='.', export=False, output_dir='.', image_path=None, upscale_factor=None, ocr='tesseract')`** reads a pedigree image and returns a pandas DataFrame with the columns FamilyID, IndividualID, PaternalID, MaternalID, Sex (1 male, 2 female, 0 unknown) and Phenotype (1 unaffected, 2 affected). There is a row for each person, generation by generation, and from left to right within a generation. PaternalID and MaternalID are 0 for anyone whose parents aren't in the drawing.
 
 - **FamID** (string): the family ID, which fills the FamilyID column. Unless `image_path` is given, the image read is `raw_image_dir/<FamID>.png`
 - **raw_image_dir** (string): the folder the image is in (default: the working directory)
 - **export** (bool): whether to write the PED file as well, as `output_dir/<FamID>.ped` (default: False)
 - **output_dir** (string): the folder to write the PED file in, made if it doesn't exist (default: the working directory)
 - **image_path** (string): the image to read, in place of `raw_image_dir/<FamID>.png`. Any format Pillow opens will do, JPEG included
-- **upscale_factor** (number): how many times to enlarge the image before reading it (default: 10). The thresholds for lines and symbols are set in pixels and suit an image several thousand pixels across, so the default is right for an image a few hundred pixels across, such as a pedigree cut from a paper or a screenshot. For a larger image or a scan, a smaller factor gives much the same result more quickly and with less memory
+- **upscale_factor** (number): how many times to enlarge the image before reading it. The distances that lines are traced and joined over are set in pixels, and suit symbols about 200 pixels across (`SYMBOL_PIXELS`), so by default PedInterp measures the symbols in a copy of the image 2,000 pixels across on its longer side, and enlarges the image by as much as makes them that size (`choose_upscale(image_path)` gives the factor, rounded down to one decimal place, and the result records it in `df.attrs['upscale_factor']`). A pedigree cut from a paper may be enlarged ten times or more, and a scan or a photograph much less, or even made smaller, which is quicker and takes less memory. The factor is kept between 0.25 and 20, and the enlarged image never has more than 60 million pixels (`MAX_PIXELS`). When a limit keeps it well short of what the symbols need, a warning says so: a larger copy of a very small picture would read better, and a page with a small pedigree on it should be cut down to the pedigree
 - **ocr**: how to read the labels (default: `'tesseract'`). `None` or `'none'` numbers the people instead, and a function can read the labels with other OCR. See [Without Tesseract, and in a browser](#without-tesseract-and-in-a-browser)
 
 The image is enlarged in memory, so nothing is written next to it.
@@ -58,7 +58,7 @@ pedinterp FAM1.png -d ped                  # writes ped/FAM1.ped
 pedinterp scan.jpg -f FAM2 --labels none   # numbers the people rather than reading their labels
 ```
 
-The family ID is the picture's name without its ending, unless `-f` gives another, and the PED file is named after it. The table is printed too, unless `-q` is given. `--upscale` does what `upscale_factor` does, and `--labels none` what `ocr=None` does. If the picture can't be read, or has no pedigree in it, the command says why and exits with status 1; warnings, such as one for a label that wasn't matched to a symbol, are printed without stopping it. `pedinterp --help` lists the options.
+The family ID is the picture's name without its ending, unless `-f` gives another, and the PED file is named after it. The table is printed too, with how many times the picture was enlarged, unless `-q` is given. `--upscale` does what `upscale_factor` does, and `--labels none` what `ocr=None` does. If the picture can't be read, or has no pedigree in it, the command says why and exits with status 1; warnings, such as one for a label that wasn't matched to a symbol, are printed without stopping it. `pedinterp --help` lists the options.
 
 ## What PedInterp expects of a drawing
 
@@ -158,7 +158,18 @@ pedigree_processing('FAM1', image_path='FAM1.png', ocr=None).to_csv(sep='\\t', h
 `);
 ```
 
-Reading a drawing takes a few seconds, and a good deal of memory for a large one, as the image is enlarged. Under Pyodide in Node, the four-generation test drawing, 1200 by 740 pixels, took about 10 seconds to read when enlarged ten times, and Pyodide's memory grew to about 880 MB; enlarged five times, it took 3 seconds and under 300 MB, and gave the same table. In a browser, then, it's worth choosing `upscale_factor` so that the enlarged image is a few thousand pixels across rather than more, and running Pyodide in a web worker, so that the page doesn't freeze while it works.
+Reading a drawing takes a few seconds, and a good deal of memory for a large one, as the image is enlarged. Under Pyodide in Node, the four-generation test drawing, 1200 by 740 pixels, took about 10 seconds to read when enlarged ten times, and Pyodide's memory grew to about 880 MB; enlarged five times, it took 3 seconds and under 300 MB, and gave the same table. The factor PedInterp chooses keeps the image no larger than its symbols need, and never above 60 million pixels, but it's still worth running Pyodide in a web worker, so that the page doesn't freeze while it works.
+
+### What a missed line looks like
+
+The lines between the symbols can be missed: most often when the picture is enlarged too little, or far too much, and with lines much bolder than the symbols' outlines. PedInterp warns (`missed_lines`) when what it read looks like a missed line:
+
+- someone has only one parent;
+- someone below the top row has no parents, no children and no partners' line to them;
+- the parents and children it found split the people into more than one family, as when the line up from someone who has children is missed;
+- no one has parents at all, though the symbols are in more than one row.
+
+The warning says how many times the picture was enlarged, and enlarging it a little more or less may help. Not every misreading looks like one of these, such as someone given the wrong parents, so check the table against the picture.
 
 ### Checking PedInterp under Pyodide
 

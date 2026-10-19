@@ -60,6 +60,15 @@ def test_upscale(tmp_path):
     assert read_ped(tmp_path / 'large.ped')[COLUMNS].values.tolist() == THREE_GENERATIONS_NUMBERED
 
 
+def test_says_how_much_it_enlarged_the_picture(tmp_path, capsys):
+    draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
+    factor = pedigree_processing('P', image_path=str(tmp_path / 'p.png'), ocr=None).attrs['upscale_factor']
+    assert main([str(tmp_path / 'p.png'), '-d', str(tmp_path), '--labels', 'none']) == 0
+    assert f'(the picture was read enlarged {factor:g} times)' in capsys.readouterr().out
+    assert main([str(tmp_path / 'p.png'), '-d', str(tmp_path), '--labels', 'none', '-q']) == 0
+    assert 'the picture was read enlarged' not in capsys.readouterr().out
+
+
 @pytest.mark.parametrize('factor', ['0', '-2', 'ten', 'nan'])
 def test_upscale_must_be_a_positive_number(tmp_path, factor, capsys):
     with pytest.raises(SystemExit) as stopped:

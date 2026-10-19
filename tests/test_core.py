@@ -10,9 +10,11 @@ import pandas as pd
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
+import PedInterp.core as core
 from PedInterp import PED_export, pedigree_processing
-from PedInterp.core import (categorize_normalize_lines, detect_symbols, erase_loose_marks, generation_id,
-                            generation_places, merge_duplicate_lines, roman_numeral, stroke_width)
+from PedInterp.core import (SYMBOL_PIXELS, categorize_normalize_lines, choose_upscale, detect_symbols,
+                            erase_loose_marks, generation_id, generation_places, merge_duplicate_lines, roman_numeral,
+                            stroke_width)
 
 needs_tesseract = pytest.mark.skipif(shutil.which('tesseract') is None or importlib.util.find_spec('pytesseract') is None,
                                      reason='needs the Tesseract OCR engine and pytesseract')
@@ -25,7 +27,7 @@ def draw_pedigree(path, people, couples, size, symbol=SYMBOL, line=3, labels=Tru
     '''
     Draws a pedigree in the usual style, in black on white, with symbols symbol pixels across and lines line pixels wide.
     people: id -> (x, y, sex 'M', 'F' or 'U', affected), with (x, y) the middle of the person's symbol
-    couples: (partner drawn on the left, partner drawn on the right, [children])
+    couples: (partner drawn on the left, partner drawn on the right, [children]), the children possibly none
     labels: whether to write each person's id under their symbol
     gap: how far short of the symbols the lines stop
     slash: the people whose symbols have a slash through them, as for someone who has died
@@ -42,6 +44,8 @@ def draw_pedigree(path, people, couples, size, symbol=SYMBOL, line=3, labels=Tru
         lx, ly = people[left][:2]
         rx, ry = people[right][:2]
         draw.line([(lx + half + gap, ly), (rx - half - gap, ry)], fill='black', width=line)
+        if not children:
+            continue
         middle = (lx + rx) / 2
         sibship = people[children[0]][1] - half - 30
         draw.line([(middle, ly), (middle, sibship)], fill='black', width=line)
@@ -548,3 +552,139 @@ def test_partners_on_either_side(tmp_path):
     df = pedigree_processing('FAMP', image_path=str(tmp_path / 'pedigree.png'), ocr=None)
     assert as_rows(df) == [['I-1', '0', '0', '2', '1'], ['I-2', '0', '0', '1', '2'], ['I-3', '0', '0', '2', '1'],
                            ['II-1', 'I-2', 'I-1', '1', '2'], ['II-2', 'I-2', 'I-3', '2', '1']]
+
+
+def test_enlarged_to_suit_its_symbols(tmp_path):
+    # by default a picture is enlarged so that its symbols are about SYMBOL_PIXELS across, whatever its size: one drawn
+    # three times as large is enlarged a third as much, and both are read correctly
+    draw_pedigree(tmp_path / 'small.png', *THREE_GENERATIONS, labels=False)
+    small = Image.open(tmp_path / 'small.png')
+    small.resize((small.width * 3, small.height * 3), Image.LANCZOS).save(tmp_path / 'large.png')
+    factors = [choose_upscale(str(tmp_path / name)) for name in ('small.png', 'large.png')]
+    assert 0.7 * SYMBOL_PIXELS < factors[0] * SYMBOL < 1.3 * SYMBOL_PIXELS
+    assert factors[1] == pytest.approx(factors[0] / 3, rel=0.1)
+    for name, factor in zip(('small.png', 'large.png'), factors):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            df = pedigree_processing('FAMS', image_path=str(tmp_path / name), ocr=None)
+        assert as_rows(df) == THREE_GENERATIONS_NUMBERED and df.attrs['upscale_factor'] == factor
+
+
+def test_never_enlarged_past_max_pixels(tmp_path, monkeypatch):
+    # the factor is rounded down, so that rounding never takes it past the limit (2.06 times would round to 2.1)
+    draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
+    width, height = Image.open(tmp_path / 'p.png').size
+    monkeypatch.setattr(core, 'MAX_PIXELS', int(2.06 ** 2 * width * height))
+    factor = choose_upscale(str(tmp_path / 'p.png'))
+    assert factor == 2.0 and width * height * factor ** 2 <= core.MAX_PIXELS
+    # and when that keeps it well short of what the symbols need, a warning says to cut the picture down
+    with pytest.warns(UserWarning, match='too large to enlarge'):
+        pedigree_processing('FAMX', image_path=str(tmp_path / 'p.png'), ocr=None)
+
+
+def test_between_a_quarter_and_twenty_times(tmp_path):
+    # two symbols 900 pixels across need a fifth: no less than a quarter
+    image = Image.new('RGB', (3000, 1500), 'white')
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([300, 300, 1200, 1200], outline='black', width=30)
+    draw.ellipse([1800, 300, 2700, 1200], outline='black', width=30, fill='black')
+    image.save(tmp_path / 'big.png')
+    assert choose_upscale(str(tmp_path / 'big.png')) == 0.25
+    # a drawing an eighth of its size needs more than twenty times: no more
+    draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
+    small = Image.open(tmp_path / 'p.png')
+    small.resize((small.width // 8, small.height // 8), Image.LANCZOS).save(tmp_path / 'tiny.png')
+    assert choose_upscale(str(tmp_path / 'tiny.png')) == 20
+
+
+def test_large_pictures_are_measured_in_a_smaller_copy(tmp_path, monkeypatch):
+    draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
+    image = Image.open(tmp_path / 'p.png')
+    image.resize((image.width * 4, image.height * 4), Image.LANCZOS).save(tmp_path / 'large.png')
+    seen = []
+    real = core.detect_symbols
+
+    def detect(gray, area, **options):
+        seen.append(gray.shape)
+        return real(gray, area, **options)
+
+    monkeypatch.setattr(core, 'detect_symbols', detect)
+    factor = choose_upscale(str(tmp_path / 'large.png'))
+    assert max(seen[0]) == 2000
+    assert factor == pytest.approx(choose_upscale(str(tmp_path / 'p.png')) / 4, abs=0.15)
+
+
+def test_a_picture_without_symbols_is_enlarged_to_5000_pixels(tmp_path):
+    Image.new('RGB', (1000, 600), 'white').save(tmp_path / 'blank.png')
+    assert choose_upscale(str(tmp_path / 'blank.png')) == 5
+
+
+@pytest.mark.parametrize('factor, warned', [(1, "No one's parents were found, though the symbols are in 3 rows"),
+                                            (2, 'joined to no one')])
+def test_missed_lines_are_warned(tmp_path, factor, warned):
+    # enlarged too little, this drawing loses some of its lines: a warning says so, and how much it was enlarged
+    draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
+    with pytest.warns(UserWarning, match=warned) as caught:
+        pedigree_processing('FAMW', image_path=str(tmp_path / 'p.png'), ocr=None, upscale_factor=factor)
+    assert any(f'enlarged {factor} times' in str(w.message) for w in caught)
+
+
+def test_partner_with_no_children_is_not_warned(tmp_path):
+    # II-3 has a wife and no children: she is joined to the family by the partners' line alone, which a PED file can't
+    # hold, but that is no missed line
+    people, couples, (width, height) = THREE_GENERATIONS
+    people = {**people, 204: (780, 250, 'F', False)}
+    draw_pedigree(tmp_path / 'p.png', people, couples + [(203, 204, [])], (width + 120, height), labels=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        df = pedigree_processing('FAMC', image_path=str(tmp_path / 'p.png'), ocr=None)
+    assert as_rows(df)[5] == ['II-4', '0', '0', '2', '1']
+
+
+def test_one_row_is_not_warned(tmp_path):
+    draw_pedigree(tmp_path / 'p.png', {1: (200, 100, 'M', True), 2: (440, 100, 'F', False)}, [(1, 2, [])], (640, 200),
+                  labels=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        df = pedigree_processing('FAMR', image_path=str(tmp_path / 'p.png'), ocr=None)
+    assert len(df) == 2
+
+
+def test_a_family_split_in_two_is_warned(tmp_path, monkeypatch):
+    # the line up from II-1, who has children, is missed: everyone else has parents or children, but the family is in
+    # two pieces
+    real = core.trackRelation
+
+    def lose_her_parents(lines, people):
+        people, connections = real(lines, people)
+        people['II-1']['PaternalID'] = people['II-1']['MaternalID'] = 0
+        return people, connections
+
+    monkeypatch.setattr(core, 'trackRelation', lose_her_parents)
+    draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
+    with pytest.warns(UserWarning, match=r'fall into 2 families, not one \(of 5, 3 people\)'):
+        pedigree_processing('FAMW', image_path=str(tmp_path / 'p.png'), ocr=None)
+
+
+def test_one_parent_is_warned(tmp_path, monkeypatch):
+    # as when the line to one partner is missed
+    real = core.trackRelation
+
+    def lose_a_mother(lines, people):
+        people, connections = real(lines, people)
+        people['III-1']['MaternalID'] = 0
+        return people, connections
+
+    monkeypatch.setattr(core, 'trackRelation', lose_a_mother)
+    draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
+    with pytest.warns(UserWarning, match='III-1: only a father was found'):
+        pedigree_processing('FAMW', image_path=str(tmp_path / 'p.png'), ocr=None)
+
+
+def test_no_symbols_suggests_cutting_the_picture_down(tmp_path):
+    Image.new('RGB', (1200, 900), 'white').save(tmp_path / 'blank.png')
+    with pytest.raises(ValueError, match='cut the picture down to the pedigree'):
+        pedigree_processing('FAMB', image_path=str(tmp_path / 'blank.png'), ocr=None)
+    # unless it was enlarged as much as it can be: then it may be too small
+    with pytest.raises(ValueError, match='may be too small to read'):
+        pedigree_processing('FAMB', image_path=str(tmp_path / 'blank.png'), ocr=None, upscale_factor=20)
