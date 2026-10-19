@@ -1,6 +1,6 @@
 # Pedigree Interpreter Package
 
-PedInterp reads an image of a clinical pedigree and turns it into a table laid out like a PED file, giving each person's parents, sex and affection status. The table can then be written out as a PED file.
+PedInterp reads an image of a clinical pedigree, drawn with software such as [Pedigree Studio](https://github.com/comparativechrono/pedigreestudio) or sketched by hand, and turns it into a table laid out like a PED file, giving each person's parents, sex and affection status, and which children are twins. The table can then be written out as a PED file, or as a GA4GH Pedigree, which can hold the twins as well.
 
 ## Prerequisites
 
@@ -29,28 +29,32 @@ pip install PedInterp
 ## Usage
 
 ```python
-from PedInterp import pedigree_processing, PED_export
+from PedInterp import pedigree_processing, PED_export, GA4GH_export
 
 df = pedigree_processing('FAM1', raw_image_dir='images')   # reads images/FAM1.png
 PED_export(df, output_dir='ped')                            # writes ped/FAM1.ped
 GA4GH_export(df, output_dir='ped')                          # writes ped/FAM1_ga4gh-pedigree.json
+
+sketch = pedigree_processing('FAM2', image_path='sketch.png', hand_drawn=True)   # a pedigree sketched by hand
+sketch.attrs['twins']                                                         # e.g. [['II-2', 'II-3', 'MZ']]
 ```
 
-**`pedigree_processing(FamID, raw_image_dir='.', export=False, output_dir='.', image_path=None, upscale_factor=None, ocr='tesseract')`** reads a pedigree image and returns a pandas DataFrame with the columns FamilyID, IndividualID, PaternalID, MaternalID, Sex (1 male, 2 female, 0 unknown) and Phenotype (1 unaffected, 2 affected). There is a row for each person, generation by generation, and from left to right within a generation. PaternalID and MaternalID are 0 for anyone whose parents aren't in the drawing.
+**`pedigree_processing(FamID, raw_image_dir='.', export=False, output_dir='.', image_path=None, upscale_factor=None, ocr='auto', hand_drawn=False)`** reads a pedigree image and returns a pandas DataFrame with the columns FamilyID, IndividualID, PaternalID, MaternalID, Sex (1 male, 2 female, 0 unknown) and Phenotype (1 unaffected, 2 affected). There is a row for each person, generation by generation, and from left to right within a generation. PaternalID and MaternalID are 0 for anyone whose parents aren't in the drawing. Twins, which a PED file can't hold, are listed in `df.attrs['twins']` (see [Twins](#twins)).
 
 - **FamID** (string): the family ID, which fills the FamilyID column. Unless `image_path` is given, the image read is `raw_image_dir/<FamID>.png`
 - **raw_image_dir** (string): the folder the image is in (default: the working directory)
 - **export** (bool): whether to write the PED file as well, as `output_dir/<FamID>.ped` (default: False)
 - **output_dir** (string): the folder to write the PED file in, made if it doesn't exist (default: the working directory)
 - **image_path** (string): the image to read, in place of `raw_image_dir/<FamID>.png`. Any format Pillow opens will do, JPEG included
-- **upscale_factor** (number): how many times to enlarge the image before reading it. The distances that lines are traced and joined over are set in pixels, and suit symbols about 200 pixels across (`SYMBOL_PIXELS`), so by default PedInterp measures the symbols in a copy of the image 2,000 pixels across on its longer side, and enlarges the image by as much as makes them that size (`choose_upscale(image_path)` gives the factor, rounded down to one decimal place, and the result records it in `df.attrs['upscale_factor']`). A pedigree cut from a paper may be enlarged ten times or more, and a scan or a photograph much less, or even made smaller, which is quicker and takes less memory. The factor is kept between 0.25 and 20, and the enlarged image never has more than 60 million pixels (`MAX_PIXELS`). When a limit keeps it well short of what the symbols need, a warning says so: a larger copy of a very small picture would read better, and a page with a small pedigree on it should be cut down to the pedigree
-- **ocr**: how to read the labels (default: `'tesseract'`). `None` or `'none'` numbers the people instead, and a function can read the labels with other OCR. See [Without Tesseract, and in a browser](#without-tesseract-and-in-a-browser)
+- **upscale_factor** (number): how many times to enlarge the image before reading it. The symbols are found best at about 200 pixels across (`SYMBOL_PIXELS`), or 100 for a sketch (`SKETCH_PIXELS`), so by default PedInterp measures the symbols in a copy of the image 2,000 pixels across on its longer side, and enlarges the image by as much as makes them that size (`choose_upscale(image_path)` gives the factor, rounded down to one decimal place, and the result records it in `df.attrs['upscale_factor']`). A pedigree cut from a paper may be enlarged ten times or more, and a scan or a photograph much less, or even made smaller, which is quicker and takes less memory. The factor is kept between 0.25 and 20, and the enlarged image never has more than 60 million pixels (`MAX_PIXELS`). When a limit keeps it well short of what the symbols need, a warning says so: a larger copy of a very small picture would read better, and a page with a small pedigree on it should be cut down to the pedigree
+- **ocr**: how to read the labels (default: `'auto'`, which is `'tesseract'` unless `hand_drawn` is given, when the people are numbered). `None` or `'none'` numbers the people instead, and a function can read the labels with other OCR. See [Without Tesseract, and in a browser](#without-tesseract-and-in-a-browser)
+- **hand_drawn** (bool): whether the pedigree is sketched by hand, in whole or in part, as with Pedigree Studio's Draw tool (default: False). See [Pedigrees drawn by hand](#pedigrees-drawn-by-hand)
 
 The image is enlarged in memory, so nothing is written next to it.
 
 **`PED_export(PED_df, output_dir='.')`** writes a DataFrame from `pedigree_processing` as a PED file, named after the family ID in its first row (`output_dir/<FamilyID>.ped`), and returns the file's path.
 
-**`GA4GH_export(PED_df, output_dir='.', condition=None)`** writes it as a GA4GH Pedigree (`output_dir/<FamilyID>_ga4gh-pedigree.json`), and returns the file's path. It is the form that [studio2ga4gh](https://github.com/comparativechrono/studio2ga4gh) writes and the lab's other GA4GH tools read, such as ga4gh2studio, phenopacket-toolkit and [PedNet](https://github.com/comparativechrono/PedNet): each person is a Phenopacket, and each parent is joined to their children by a relationship (`KIN:028` for a father, `KIN:027` for a mother). It is written with [pedigree-ga4gh](https://github.com/comparativechrono/pedigree-ga4gh), which is installed with PedInterp.
+**`GA4GH_export(PED_df, output_dir='.', condition=None)`** writes it as a GA4GH Pedigree (`output_dir/<FamilyID>_ga4gh-pedigree.json`), and returns the file's path. It is the form that [studio2ga4gh](https://github.com/comparativechrono/studio2ga4gh) writes and the lab's other GA4GH tools read, such as ga4gh2studio, phenopacket-toolkit and [PedNet](https://github.com/comparativechrono/PedNet): each person is a Phenopacket, and each parent is joined to their children by a relationship (`KIN:028` for a father, `KIN:027` for a mother). Twins are written as studio2ga4gh writes them: each twin is related to the first of their set, on the left, as an identical twin (`KIN:010`, isMonozygoticMultipleBirthSiblingOf) or a non-identical one (`KIN:011`, isPolyzygoticMultipleBirthSiblingOf), and the narrative names them. It is written with [pedigree-ga4gh](https://github.com/comparativechrono/pedigree-ga4gh), which is installed with PedInterp.
 
 - **condition** (pair of strings, optional): the condition the pedigree is about, as an ontology term and its label, such as `('MONDO:0007739', 'Huntington disease')`, or an HPO term such as `('HP:0000365', 'Hearing impairment')`, which is written as a phenotype rather than a disease (default: `('MONDO:0000001', 'disease')`, Mondo's most general term, as a picture doesn't say what the condition is). A GA4GH Pedigree records who is affected only through their conditions, so the affected have it, and the unaffected have it marked as excluded (looked for, and not found), so that their phenotypes can be read back from the file as they are in the PED file. The narrative names the picture, and how many times it was enlarged.
 
@@ -62,30 +66,62 @@ Installing PedInterp also installs the `pedinterp` command, which reads a pictur
 pedinterp FAM1.png -d ped                  # writes ped/FAM1.ped
 pedinterp scan.jpg -f FAM2 --labels none   # numbers the people rather than reading their labels
 pedinterp FAM1.png --ga4gh --condition MONDO:0007739 "Huntington disease"   # FAM1.ped and FAM1_ga4gh-pedigree.json
+pedinterp sketch.png --hand-drawn          # a pedigree sketched by hand, in whole or in part
 ```
 
-The family ID is the picture's name without its ending, unless `-f` gives another, and the PED file is named after it. The table is printed too, with how many times the picture was enlarged, unless `-q` is given. `--upscale` does what `upscale_factor` does, and `--labels none` what `ocr=None` does. `--ga4gh` writes the GA4GH Pedigree too, as `GA4GH_export` does, with `--condition ID LABEL` for its condition. If the picture can't be read, or has no pedigree in it, the command says why and exits with status 1; warnings, such as one for a label that wasn't matched to a symbol, are printed without stopping it. `pedinterp --help` lists the options.
+The family ID is the picture's name without its ending, unless `-f` gives another, and the PED file is named after it. The table is printed too, with any twins and how many times the picture was enlarged, unless `-q` is given. `--upscale` does what `upscale_factor` does, `--labels none` what `ocr=None` does, and `--hand-drawn` what `hand_drawn=True` does (and then the labels aren't read unless `--labels tesseract` is given). `--ga4gh` writes the GA4GH Pedigree too, as `GA4GH_export` does, with `--condition ID LABEL` for its condition. If the picture can't be read, or has no pedigree in it, the command says why and exits with status 1; warnings, such as one for a label that wasn't matched to a symbol, are printed without stopping it. `pedinterp --help` lists the options.
 
 ## What PedInterp expects of a drawing
 
-PedInterp reads pedigrees drawn in the usual way, in black on white:
+PedInterp reads pedigrees drawn in the usual way, dark on white:
 
-- squares for males, circles for females and diamonds for people whose sex isn't known
-- the symbols of affected people filled in, and those of unaffected people left empty
-- a label under each symbol, if the labels are to be read
-- a horizontal line between partners, from which a line goes down to a line over their children (or straight down to an only child), with a short line from that down to each child
+- squares for males, circles for females and diamonds for people whose sex isn't known; a triangle, for a pregnancy that was lost, is read as someone whose sex isn't known, as studio2ped writes it
+- the symbols of affected people filled in, and those of unaffected people left empty. Any colour is dark enough, as the darkest of a pixel's red, green and blue is what counts, so a symbol filled in yellow, as Pedigree Studio may fill one, is filled
+- a label by each symbol, if the labels are to be read
+- a line between partners, from which a line goes down to a line over their children (or straight down to an only child), with a short line from that down to each child; twins are joined to one point of the line over the children by two slanting lines, with a bar between them if they are identical
 - each generation in a row of its own, if the people are to be numbered
 
 Parents are worked out from the sex of the partners, so it doesn't matter which side the father is drawn on.
+
+The lines are read as networks: once the symbols are blanked out, the lines that join a couple to each other and to their children are joined to one another and to nothing else, so each network of lines is a family. Where a line ends at a symbol, it meets the symbol from the side, as a partner's line does, or from above, as the line down to a child does, straight or slanting. A line that ends near no symbol, having stopped a little short of the line it was meant to meet, is joined to the line it points at. Nothing depends on the lines being straight, level or upright, which is what lets PedInterp read twins and sketches.
 
 Some things aren't read yet:
 
 - **labels of a single character**, which Tesseract seldom picks out. Labels of two or more characters, such as 12 or 101, are read well, but labels with Roman numerals, such as II-3, are often misread. Anyone whose label isn't read is given an ID from their place in the drawing instead, with a warning (see [When only some labels are read](#when-only-some-labels-are-read))
 - **half-filled, shaded or hatched symbols**, such as those used for carriers. A half-filled symbol is left out. When the labels are read, a warning names its label, but when the people are numbered nothing shows that it was missed, and the others in its row are numbered as if it weren't there. The drawing is made black and white before the symbols are looked for, so a shaded symbol is read as filled if the shading is dark and as empty if it's light, and a hatched one as empty
 - **a slash through the symbol of an unaffected person who has died**, which splits the white inside the symbol in two. The two pieces are joined again, and the symbol's shape is taken from the outline round both, but a slash at an odd angle can still lead to the sex being misread
-- **lines that slope**, as for twins, which are left out with a warning
+- **lines of descent other than parents'**, such as adoption, and partners who have no children together, which a PED file can't hold
 
-OCR can misread a label (a 5 as a 3, say), so it's worth checking the table against the drawing.
+OCR can misread a label (a 5 as a 3, say), so it's worth checking the table against the drawing. Tesseract often misreads small Roman numerals, such as the numbers Pedigree Studio writes over its symbols (III-2 as Il-2, say); as they are the same numbering that PedInterp gives when it numbers the people, a picture from the Studio reads more quickly and as well with `ocr=None` (`--labels none`).
+
+## Twins
+
+Twins are read from the lines that join them to their parents' line: two children side by side whose lines slant towards each other and meet at a point above them. They are identical if a bar is drawn across between their lines, below that point. Where the lines meet is found both by fitting each line near its twin and by following the two along the skeleton to where they join: in a sketch, the lines may bend as they come to the twins, running close over the tops of their symbols, and fitted near their ends they don't point to where they meet. `df.attrs['twins']` lists each pair as `[twin, twin, 'MZ']` for identical twins or `'DZ'` for twins who aren't, with the twin on the left first; triplets are two pairs. The twins are children of their parents like their brothers and sisters, and their lines may be long and nearly level, as the Studio draws them when the twins are far apart, with families of their own. Two brothers' or sisters' lines that lean towards each other, so that they come within about a symbol's width of each other at the top, are taken for twins' lines too, so lines down to children who aren't twins are best drawn upright.
+
+The triangle that identical twins' lines make with their bar is white closed in by lines, like the inside of a symbol, and was read as one: someone of unknown sex, a diamond, between the twins and their parents, which put the twins' row wrong. A small shape with lines leading down from it to two or more people, and to no one else, is now known for the point the twins' lines come from, and the people are numbered without it.
+
+`GA4GH_export` writes the twins, and `pedinterp` prints them under the table.
+
+## Pedigrees drawn by hand
+
+`hand_drawn=True` (`--hand-drawn`) reads a pedigree sketched by hand, in whole or in part: drawn with a pen or a mouse, as with Pedigree Studio's Draw tool, or begun with the Studio's symbols and finished by hand. It allows for what makes a sketch rough:
+
+- symbols of unequal sizes, down to about four tenths of the typical one
+- outlines that don't quite close, or run on past where they began, and symbols drawn in two strokes
+- filled symbols scribbled or hatched in, rather than filled solid
+- lines that wobble and slope, stop short of what they join or run a little past it, and a line down to a child drawn as a stroke of its own, not quite meeting the line above
+- any pen colour darker than a light grey
+
+The picture is read at a size where its symbols are about 100 pixels across, which is about the size Pedigree Studio saves its pictures at, and the labels aren't read unless asked for, as labels written by hand can't be, and Tesseract may take the strokes that fill a symbol in for letters.
+
+Sketches are read well, but not as surely as drawings. On 96 pedigrees drawn with Pedigree Studio and its Draw tool for testing, and kept apart from those used in making these changes (a quarter drawn with the Studio's symbols, with twins, a quarter begun with them and finished by hand, and half sketched throughout, with symbols from about 0.6 to 1.4 times the size of the Studio's), it read every person right in all 24 drawn with symbols, 23 of the 24 begun with them, and 40 of the 48 sketches, getting about 97% of the sketched people right (445 of 459). It read every pair of twins right in the drawings, with `hand_drawn` or without, all 13 in those begun with the Studio's symbols, and 20 of 23 in the sketches. On the four earlier sets, used while making these changes, it read 51 of the 60 sketched pairs right: the bar between twins' lines is short and easily lost in a rough sketch, and lines to twins drawn close over their symbols may be cut short by them. An independent check, on 81 pedigrees drawn by a separate program, in the Studio's style and sketched, found much the same: it read every drawing right, with `hand_drawn` or without, all 6 pictures begun with symbols and finished by hand, and 16 of its 20 sketches, and most of the rest of what it misread had a line drawn close beside a symbol scribbled in, or a small triangle that was missed. Warnings say when a line seems to have been missed, so check the table against the sketch. Sketches read best when:
+
+- the lines touch, or nearly touch, the symbols and the lines they join
+- the symbols are kept apart from each other, and from the lines that pass by them: a line drawn close beside a symbol filled in by scribbling or hatching, such as the line down from a couple drawn close to one of them, or the line over a family's children drawn close over a child, may be taken for part of the symbol, which then loses that line
+- the outlines of symbols are closed, especially where a line leaves them. A small triangle, for a pregnancy lost, is the symbol most often missed
+- twins' lines meet at a clear point, with the bar of identical twins drawn right across between them, not up against the point the lines come from
+
+When PedInterp reads a picture without `hand_drawn`, and finds no symbols or what looks like a missed line, its error or warning says to read the picture with `hand_drawn=True` if it was drawn by hand.
 
 ## Without Tesseract, and in a browser
 
@@ -99,13 +135,14 @@ PedInterp doesn't need Tesseract, or pytesseract, to read a drawing. It imports 
 
 ### Numbering
 
-People are numbered in the usual way for pedigrees. Each row of symbols, from the top, is a generation, numbered in Roman numerals, and the people in a row are numbered from the left: the two people at the top of a drawing are I-1 and I-2, and those in the row below are II-1, II-2 and so on. Parents are given by the same IDs. A new row starts wherever the middle of a symbol is more than half a symbol's height below the one above it, so a symbol drawn a little out of line keeps its place in its row.
+People are numbered in the usual way for pedigrees. Each row of symbols, from the top, is a generation, numbered in Roman numerals, and the people in a row are numbered from the left: the two people at the top of a drawing are I-1 and I-2, and those in the row below are II-1, II-2 and so on. Parents are given by the same IDs. A new row starts where the middle of a symbol is more than half a symbol's height below the one above it and more than a symbol's height below the first of its row, so a symbol drawn a little out of line keeps its place in its row, and so does a row that slopes. This is how Pedigree Studio numbers its people, as it takes everyone up to a symbol and a half below the top of a row as in it.
 
 When the labels aren't read they are still in the drawing, so PedInterp keeps them from being taken for symbols or lines:
 
 - the holes in letters and numbers (in 0, 6, 8, 9, A, B, D and so on) are white space inside an outline, like the inside of an unfilled symbol, but much smaller. Each shape is measured with its outline: an unfilled symbol is found by the white inside it, so the width of its outline is added on either side (for a hole in a letter, the width of the letter's stroke). Nothing less than half the size of a typical symbol is then taken for a symbol, and nor is anything less than three line widths across. The typical symbol is the median filled one, as text is never taken for a filled symbol, or, if none is filled, a size that nine in ten of the shapes found are smaller than. Line widths alone wouldn't do, as the lines of a drawing can be much thinner than the strokes of its text
 - once the symbols have been found, every dark mark that couldn't be a line to a symbol is cleared away before the lines are looked for: whatever doesn't come within reach of the top or the sides of a symbol, where lines meet it. The reach is as far as the lines are traced from a symbol, so a line that stops a little short of a symbol stays, while labels under the symbols and stray marks go. If no lines are left between the symbols, a warning says so
 - shapes that overlap are taken as one symbol, so the two pieces of a symbol cut by a slash count once, and a small shape inside a larger one of the other kind, such as a carrier's dot, is left out
+- labels written just above the symbols, as Pedigree Studio writes its numbers, are taken out of the lines before they are read: a word is two or more small marks side by side, as tall as letters and no taller, and a line, even a short one down to a child, is a single stroke. A label written close under a line, as over someone who married into the family when the line over their partner's brothers and sisters passes above them, touches the line or crosses it, and would otherwise be read as a line down to them. Where the label is lighter than the line, as the Studio's grey numbers are, it is cut away from the line by how dark each is, and the line is kept whole where the label crosses it
 
 Both are done when the labels are read as well, as OCR can miss some.
 
@@ -154,7 +191,7 @@ PedInterp is plain Python, so it can be copied into Pyodide's file system with t
 const pyodide = await loadPyodide();
 await pyodide.loadPackage(["numpy", "pandas", "opencv-python", "pillow"]);
 pyodide.FS.mkdirTree("/home/pyodide/PedInterp");   // Pyodide starts in /home/pyodide, which is on Python's path
-for (const file of ["__init__.py", "core.py"]) {
+for (const file of ["__init__.py", "core.py", "lines.py", "shapes.py"]) {
   pyodide.FS.writeFile(`/home/pyodide/PedInterp/${file}`, await (await fetch(`PedInterp/${file}`)).text());
 }
 pyodide.FS.writeFile("/home/pyodide/FAM1.png", new Uint8Array(await imageFile.arrayBuffer()));
@@ -166,7 +203,7 @@ pedigree_processing('FAM1', image_path='FAM1.png', ocr=None).to_csv(sep='\\t', h
 
 `GA4GH_export` also needs pedigree-ga4gh, which is plain Python too: copy its folder in the same way, or install it with micropip. It is imported only when the function is called, so reading a drawing doesn't need it.
 
-Reading a drawing takes a few seconds, and a good deal of memory for a large one, as the image is enlarged. Under Pyodide in Node, the four-generation test drawing, 1200 by 740 pixels, took about 10 seconds to read when enlarged ten times, and Pyodide's memory grew to about 880 MB; enlarged five times, it took 3 seconds and under 300 MB, and gave the same table. The factor PedInterp chooses keeps the image no larger than its symbols need, and never above 60 million pixels, but it's still worth running Pyodide in a web worker, so that the page doesn't freeze while it works.
+Reading a drawing takes a few seconds, and a good deal of memory for a large one, as the image is enlarged. Under Pyodide in Node, the four-generation test drawing, 1200 by 740 pixels, took between 4 and 6 seconds to read, a family with twins as Pedigree Studio draws it 1 to 2 seconds, and a sketch about 3 seconds, and Pyodide's memory grew to between 500 and 550 MB over the whole check. The factor PedInterp chooses keeps the image no larger than its symbols need, and never above 60 million pixels, but it's still worth running Pyodide in a web worker, so that the page doesn't freeze while it works.
 
 ### What a missed line looks like
 
@@ -181,7 +218,7 @@ The warning says how many times the picture was enlarged, and enlarging it a lit
 
 ### Checking PedInterp under Pyodide
 
-The script `tests/pyodide/check.mjs` runs PedInterp under Pyodide 0.29.5 in Node. It copies PedInterp's source into Pyodide's file system with the test pedigrees, drawn beforehand in ordinary Python. Each pedigree is read with `ocr=None`, one again with an `ocr` function given words from JavaScript, as from tesseract.js, and one with the default `ocr`, which should warn that Tesseract can't be run. Every table is checked against the one it should be. It needs Node 18 or later, as Pyodide does:
+The script `tests/pyodide/check.mjs` runs PedInterp under Pyodide 0.29.5 in Node. It copies PedInterp's source into Pyodide's file system with the test pedigrees, drawn beforehand in ordinary Python. Each pedigree is read with `ocr=None`, one again with an `ocr` function given words from JavaScript, as from tesseract.js, and one with the default `ocr`, which should warn that Tesseract can't be run. A family with twins, as Pedigree Studio draws it, and a family sketched by hand, read with `hand_drawn=True`, are read too, with their twins. Every table is checked against the one it should be. It needs Node 18 or later, as Pyodide does:
 
 ```bash
 cd tests/pyodide
@@ -194,7 +231,7 @@ The first time, Pyodide downloads the wheels it needs (numpy, pandas, opencv-pyt
 
 ## Tests
 
-The tests draw pedigrees to read, so they need the DejaVu Sans font as well as pytest. The tests that read the labels with Tesseract need Tesseract too, and are skipped without it; the others, which number the people or read the labels through an `ocr` function, don't.
+The tests draw pedigrees to read, in the usual style, as Pedigree Studio draws them and as people sketch them (`tests/drawings.py`), so they need the DejaVu Sans fonts as well as pytest. The tests that read the labels with Tesseract need Tesseract too, and are skipped without it; the others, which number the people or read the labels through an `ocr` function, don't.
 
 ```bash
 pip install -e ".[test]"

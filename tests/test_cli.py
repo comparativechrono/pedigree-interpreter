@@ -6,10 +6,13 @@ import pandas as pd
 import pytest
 from PIL import Image
 
+import PedInterp.core as core
 from PedInterp import GA4GH_export, PED_export, pedigree_processing
 from PedInterp.cli import main
+from drawings import sketch_picture, studio_picture
 from test_core import (COLUMNS, THREE_GENERATIONS, THREE_GENERATIONS_NUMBERED, TWO_GENERATIONS,
                        TWO_GENERATIONS_NUMBERED, draw_pedigree, needs_tesseract)
+from test_twins_and_sketches import RED, SKETCH, SKETCH_COUPLES, SKETCH_READ, SKETCH_TWINS, TWINS, TWINS_COUPLES
 
 
 def read_ped(path):
@@ -153,3 +156,36 @@ def test_runs_as_a_module():
     result = subprocess.run([sys.executable, '-m', 'PedInterp.cli', '--version'], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith('pedinterp ')
+
+
+def test_hand_drawn(tmp_path, monkeypatch, capsys):
+    # --hand-drawn reads a sketch as one, with people numbered, and says which children are twins, as a PED file can't
+    def tesseract(image):
+        raise AssertionError('Tesseract should not be asked to read a sketch')
+
+    monkeypatch.setattr(core, 'tesseract_words', tesseract)
+    sketch_picture(tmp_path / 'sketch.png', SKETCH, SKETCH_COUPLES, SKETCH_TWINS, seed=0, pen=RED, width=4)
+    assert main([str(tmp_path / 'sketch.png'), '-d', str(tmp_path), '--hand-drawn']) == 0
+    assert read_ped(tmp_path / 'sketch.ped')[COLUMNS].values.tolist() == SKETCH_READ
+    assert 'twins: II-2 and II-3 (not identical)' in capsys.readouterr().out
+
+
+def test_twins_are_printed(tmp_path, capsys):
+    studio_picture(tmp_path / 'twins.png', TWINS, TWINS_COUPLES, [('II-2', 'II-3', 'MZ')])
+    assert main([str(tmp_path / 'twins.png'), '-d', str(tmp_path), '--labels', 'none']) == 0
+    assert 'twins: II-2 and II-3 (identical)' in capsys.readouterr().out
+    assert main([str(tmp_path / 'twins.png'), '-d', str(tmp_path), '--labels', 'none', '-q']) == 0
+    assert 'twins:' not in capsys.readouterr().out
+
+
+def test_suggests_hand_drawn(tmp_path, monkeypatch, capsys):
+    # when lines seem to have been missed, it says that a sketch reads better with --hand-drawn
+    monkeypatch.setattr(core, 'missed_lines', lambda *args: ['II-1: only a father was found, so a line may have been missed'])
+    draw_pedigree(tmp_path / 'p.png', *TWO_GENERATIONS, labels=False)
+    assert main([str(tmp_path / 'p.png'), '-d', str(tmp_path), '--labels', 'none', '-q']) == 0
+    err = capsys.readouterr().err
+    assert 'read it with --hand-drawn' in err and 'hand_drawn=True' not in err
+    Image.new('RGB', (300, 200), 'white').save(tmp_path / 'blank.png')
+    assert main([str(tmp_path / 'blank.png'), '-d', str(tmp_path), '--labels', 'none']) == 1
+    err = capsys.readouterr().err
+    assert 'read it with --hand-drawn' in err and 'hand_drawn=True' not in err

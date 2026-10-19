@@ -14,9 +14,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 import PedInterp.core as core
 from PedInterp import GA4GH_export, PED_export, pedigree_processing
-from PedInterp.core import (SYMBOL_PIXELS, categorize_normalize_lines, choose_upscale, detect_symbols,
-                            erase_loose_marks, generation_id, generation_places, merge_duplicate_lines, roman_numeral,
-                            stroke_width)
+from PedInterp.core import (SYMBOL_PIXELS, choose_upscale, detect_symbols, erase_loose_marks, generation_id,
+                            generation_places, roman_numeral, stroke_width)
 
 needs_tesseract = pytest.mark.skipif(shutil.which('tesseract') is None or importlib.util.find_spec('pytesseract') is None,
                                      reason='needs the Tesseract OCR engine and pytesseract')
@@ -331,38 +330,6 @@ def test_symbols():
     assert found == [(0, 0, 1, 2), (0, 1, 1, 1),
                      (1, 0, 2, 2), (1, 1, 2, 1),
                      (2, 0, 0, 2), (2, 1, 0, 1)]
-
-
-def test_no_lines_found():
-    # HoughLinesP returns None rather than an empty array when it finds no lines
-    assert categorize_normalize_lines(None, 1000, 1000) == {'vertical': [], 'horizontal': []}
-
-
-@pytest.mark.parametrize('shape', [(-1, 1, 4), (-1, 4)])
-def test_lines_from_either_version_of_opencv(shape):
-    # OpenCV 4 gives HoughLinesP's lines the shape (n, 1, 4), and OpenCV 5 the shape (n, 4).
-    # Vertical lines come back from the bottom up and horizontal ones from left to right.
-    lines = np.array([[100, 300, 100, 900], [700, 500, 100, 500]]).reshape(shape)
-    out = categorize_normalize_lines(lines, 1000, 1000)
-    assert out['vertical'] == [(100, 900, 100, 300)]
-    assert out['horizontal'] == [(100, 500, 700, 500)]
-
-
-def test_merging_lines():
-    lines = {'horizontal': [(100, 500, 700, 500), (300, 520, 700, 520), (700, 490, 900, 490), (100, 900, 300, 900)],
-             'vertical': [(100, 900, 100, 300), (120, 700, 120, 300), (2000, 900, 2000, 300)]}
-    merged = merge_duplicate_lines(lines)
-    # a line inside another, even sharing an end, is the same line, and lines that meet end to end are joined
-    assert merged['horizontal'] == [(100, 500, 900, 500), (100, 900, 300, 900)]
-    assert merged['vertical'] == [(100, 900, 100, 300), (2000, 900, 2000, 300)]
-
-
-@pytest.mark.parametrize('order', [(0, 1, 2), (2, 1, 0), (0, 2, 1), (1, 0, 2)])
-def test_merging_lines_in_any_order(order):
-    # the third piece joins the other two, which don't touch each other
-    pieces = [(100, 500, 300, 500), (600, 500, 900, 500), (250, 500, 650, 500)]
-    merged = merge_duplicate_lines({'horizontal': [pieces[i] for i in order], 'vertical': []})
-    assert merged['horizontal'] == [(100, 500, 900, 500)]
 
 
 def test_line_width():
@@ -687,14 +654,47 @@ def test_a_picture_without_symbols_is_enlarged_to_5000_pixels(tmp_path):
     assert choose_upscale(str(tmp_path / 'blank.png')) == 5
 
 
-@pytest.mark.parametrize('factor, warned', [(1, "No one's parents were found, though the symbols are in 3 rows"),
-                                            (2, 'joined to no one')])
-def test_missed_lines_are_warned(tmp_path, factor, warned):
-    # enlarged too little, this drawing loses some of its lines: a warning says so, and how much it was enlarged
+def erase(path, *boxes):
+    '''whitens parts of a picture, (left, top, right, bottom) each, as if lines were missing'''
+    image = Image.open(path)
+    draw = ImageDraw.Draw(image)
+    for box in boxes:
+        draw.rectangle(box, fill='white')
+    image.save(path)
+
+
+#: (the warnings that a line may have been missed say how to read a pedigree drawn by hand, as tested once below)
+HINT = pytest.mark.filterwarnings('ignore:If the pedigree is drawn by hand:UserWarning')
+
+
+@HINT
+def test_a_missing_line_is_warned(tmp_path):
+    # the line down to III-3 is missing: they are joined to no one, and a warning says so, with how much the picture
+    # was enlarged
+    people, couples, size = THREE_GENERATIONS
     draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
-    with pytest.warns(UserWarning, match=warned) as caught:
-        pedigree_processing('FAMW', image_path=str(tmp_path / 'p.png'), ocr=None, upscale_factor=factor)
-    assert any(f'enlarged {factor} times' in str(w.message) for w in caught)
+    x, y = people[303][:2]
+    erase(tmp_path / 'p.png', (x - 6, y - SYMBOL / 2 - 29, x + 6, y - SYMBOL / 2 - 2))
+    with pytest.warns(UserWarning, match='III-3: joined to no one') as caught:
+        df = pedigree_processing('FAMW', image_path=str(tmp_path / 'p.png'), ocr=None)
+    assert as_rows(df)[-1] == ['III-3', '0', '0', '0', '1']
+    assert any('enlarged' in str(w.message) for w in caught)
+    # and, as the picture may have been sketched by hand, that it can be read as a sketch
+    assert [str(w.message) for w in caught].count(core.HAND_DRAWN_HINT) == 1
+
+
+@HINT
+def test_no_lines_down_is_warned(tmp_path):
+    # the lines down from both couples are missing: no one has parents, though the symbols are in three rows
+    people, couples, size = THREE_GENERATIONS
+    draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
+    boxes = []
+    for left, right, children in couples:
+        middle = (people[left][0] + people[right][0]) / 2
+        boxes.append((middle - 8, people[left][1] + 4, middle + 8, people[children[0]][1] - SYMBOL / 2 - 34))
+    erase(tmp_path / 'p.png', *boxes)
+    with pytest.warns(UserWarning, match="No one's parents were found, though the symbols are in 3 rows"):
+        pedigree_processing('FAMW', image_path=str(tmp_path / 'p.png'), ocr=None)
 
 
 def test_partner_with_no_children_is_not_warned(tmp_path):
@@ -718,32 +718,34 @@ def test_one_row_is_not_warned(tmp_path):
     assert len(df) == 2
 
 
+@HINT
 def test_a_family_split_in_two_is_warned(tmp_path, monkeypatch):
     # the line up from II-1, who has children, is missed: everyone else has parents or children, but the family is in
     # two pieces
-    real = core.trackRelation
+    real = core.read_relations
 
-    def lose_her_parents(lines, people):
-        people, connections = real(lines, people)
+    def lose_her_parents(lines, people, **options):
+        found = real(lines, people, **options)
         people['II-1']['PaternalID'] = people['II-1']['MaternalID'] = 0
-        return people, connections
+        return found
 
-    monkeypatch.setattr(core, 'trackRelation', lose_her_parents)
+    monkeypatch.setattr(core, 'read_relations', lose_her_parents)
     draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
     with pytest.warns(UserWarning, match=r'fall into 2 families, not one \(of 5, 3 people\)'):
         pedigree_processing('FAMW', image_path=str(tmp_path / 'p.png'), ocr=None)
 
 
+@HINT
 def test_one_parent_is_warned(tmp_path, monkeypatch):
     # as when the line to one partner is missed
-    real = core.trackRelation
+    real = core.read_relations
 
-    def lose_a_mother(lines, people):
-        people, connections = real(lines, people)
+    def lose_a_mother(lines, people, **options):
+        found = real(lines, people, **options)
         people['III-1']['MaternalID'] = 0
-        return people, connections
+        return found
 
-    monkeypatch.setattr(core, 'trackRelation', lose_a_mother)
+    monkeypatch.setattr(core, 'read_relations', lose_a_mother)
     draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
     with pytest.warns(UserWarning, match='III-1: only a father was found'):
         pedigree_processing('FAMW', image_path=str(tmp_path / 'p.png'), ocr=None)
@@ -751,8 +753,9 @@ def test_one_parent_is_warned(tmp_path, monkeypatch):
 
 def test_no_symbols_suggests_cutting_the_picture_down(tmp_path):
     Image.new('RGB', (1200, 900), 'white').save(tmp_path / 'blank.png')
-    with pytest.raises(ValueError, match='cut the picture down to the pedigree'):
+    with pytest.raises(ValueError, match='cut the picture down to the pedigree') as raised:
         pedigree_processing('FAMB', image_path=str(tmp_path / 'blank.png'), ocr=None)
+    assert str(raised.value).endswith(core.HAND_DRAWN_HINT)
     # unless it was enlarged as much as it can be: then it may be too small
     with pytest.raises(ValueError, match='may be too small to read'):
         pedigree_processing('FAMB', image_path=str(tmp_path / 'blank.png'), ocr=None, upscale_factor=20)

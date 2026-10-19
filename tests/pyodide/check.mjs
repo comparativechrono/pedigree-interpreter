@@ -2,7 +2,8 @@
 // is copied into Pyodide's file system with the pedigrees that draw.py drew. Each pedigree is read without OCR
 // (ocr=None), numbering the people; one is read again with an OCR function given words from JavaScript, as
 // tesseract.js's would be in a browser; and one with the default ocr, which should warn that Tesseract can't be run.
-// Every table is compared with the one it should be. Run it from this folder:
+// A family with twins, as Pedigree Studio draws it, and one sketched by hand (read with hand_drawn=True) are read too,
+// with their twins. Every table is compared with the one it should be. Run it from this folder:
 //
 //   npm install          # Pyodide 0.29.5, as in package.json
 //   python draw.py       # with the Python the tests run with
@@ -71,7 +72,7 @@ print(f'Python {sys.version.split()[0]} on {sys.platform}, with OpenCV {cv2.__ve
 columns = ['IndividualID', 'PaternalID', 'MaternalID', 'Sex', 'Phenotype']
 failures = 0
 
-def check(name, description, want, warned=None, **options):
+def check(name, description, want, warned=None, twins=None, **options):
     global failures
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
@@ -81,6 +82,7 @@ def check(name, description, want, warned=None, **options):
     rows = [[str(value) for value in row] for row in df[columns].values.tolist()]
     messages = [str(warning.message) for warning in caught]
     right = rows == want and (messages == [] if warned is None else len(messages) == 1 and warned in messages[0])
+    right = right and (twins is None or df.attrs['twins'] == twins)
     failures += not right
     print(f'{name}, {description}: {"as expected" if right else "NOT AS EXPECTED"}, in {seconds:.1f} s')
     if not right or warned:
@@ -101,6 +103,10 @@ check('three_generations', 'with labels from an OCR function', expected['read'][
 
 check('two_generations', 'with the default ocr', expected['numbered']['two_generations'],
       warned="can't be read with Tesseract")
+
+for name, case in expected['more'].items():
+    check(name, 'hand-drawn, with twins' if case['hand_drawn'] else 'with twins', case['rows'], twins=case['twins'],
+          ocr=None, hand_drawn=case['hand_drawn'])
 failures
 `);
 
