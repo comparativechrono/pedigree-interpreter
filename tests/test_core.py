@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -12,7 +13,7 @@ import pytest
 from PIL import Image, ImageDraw, ImageFont
 
 import PedInterp.core as core
-from PedInterp import PED_export, pedigree_processing
+from PedInterp import GA4GH_export, PED_export, pedigree_processing
 from PedInterp.core import (SYMBOL_PIXELS, categorize_normalize_lines, choose_upscale, detect_symbols,
                             erase_loose_marks, generation_id, generation_places, merge_duplicate_lines, roman_numeral,
                             stroke_width)
@@ -214,6 +215,48 @@ def test_mother_drawn_on_the_left(tmp_path):
 
 
 @needs_tesseract
+def test_ga4gh_export(tmp_path):
+    # the GA4GH Pedigree has everyone read, with their sexes and parents, and the condition: had by the affected, and
+    # marked as excluded for the unaffected, so that the PED file's phenotypes come back from it
+    from pedigree_ga4gh import from_ga4gh_pedigree, validate
+    draw_pedigree(tmp_path / 'fam.png', *THREE_GENERATIONS, labels=False)
+    df = pedigree_processing('FAMG', image_path=str(tmp_path / 'fam.png'), ocr=None)
+    path = GA4GH_export(df, str(tmp_path / 'out'))
+    assert path == f"{tmp_path / 'out'}/FAMG_ga4gh-pedigree.json"
+    doc = json.load(open(path))
+    assert doc['id'] == 'FAMG' and len(doc['individuals']) == len(THREE_GENERATIONS_NUMBERED)
+    assert not [f for f in validate(doc) if f.severity == 'error']
+    kindred, notes = from_ga4gh_pedigree(doc)
+    assert not notes
+    sexes = {'1': 'MALE', '2': 'FEMALE', '0': 'UNKNOWN_SEX'}
+    for person, father, mother, sex, phenotype in THREE_GENERATIONS_NUMBERED:
+        member = kindred.member(person)
+        found = kindred.genetic_parents(person)
+        assert (found[0] or '0', found[1] or '0') == (father, mother) and member.sex == sexes[sex]
+        assert [(t.id, t.label, t.excluded) for t in member.terms] == [('MONDO:0000001', 'disease', phenotype == '1')]
+    assert doc['narrative'].startswith('Read with PedInterp') and 'from fam.png, enlarged' in doc['narrative']
+
+
+@pytest.mark.parametrize('condition', [('Huntington', 'Huntington disease'), ('XYZ:1', 'unknown ontology'),
+                                       ('MONDO:0007739', ' '), 'MONDO:0007739'])
+def test_ga4gh_export_refuses_a_condition_it_cannot_write(tmp_path, condition):
+    df = pd.DataFrame([['F', 'A', '0', '0', 1, 2]], columns=['FamilyID'] + COLUMNS)
+    with pytest.raises(ValueError):
+        GA4GH_export(df, str(tmp_path), condition=condition)
+    assert not list(tmp_path.iterdir())
+
+
+def test_ga4gh_export_of_a_phenotype_and_an_unknown_one(tmp_path):
+    # an HPO term is a phenotype; someone whose phenotype is unknown (0) has no term at all
+    df = pd.DataFrame([['F', 'A', '0', '0', 1, 2], ['F', 'B', '0', '0', 2, 1], ['F', 'C', 'A', 'B', 0, 0]],
+                      columns=['FamilyID'] + COLUMNS)
+    doc = json.load(open(GA4GH_export(df, str(tmp_path), condition=('HP:0000365', 'Hearing impairment'))))
+    people = {i['subject']['id']: i for i in doc['individuals']}
+    assert people['A']['phenotypicFeatures'] == [{'type': {'id': 'HP:0000365', 'label': 'Hearing impairment'}}]
+    assert people['B']['phenotypicFeatures'][0]['excluded'] is True
+    assert 'phenotypicFeatures' not in people['C'] and people['C']['subject']['sex'] == 'UNKNOWN_SEX'
+
+
 def test_three_generations(tmp_path):
     draw_pedigree(tmp_path / 'pedigree.png', *THREE_GENERATIONS)
     df = pedigree_processing('FAME', image_path=str(tmp_path / 'pedigree.png'))

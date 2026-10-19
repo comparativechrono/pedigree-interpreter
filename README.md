@@ -20,7 +20,7 @@ Without Tesseract, PedInterp still reads the drawing, but numbers the people by 
 
 ## Installation
 
-The Python dependencies are installed with the package:
+The Python dependencies are installed with the package, which needs Python 3.9 or later:
 
 ```bash
 pip install PedInterp
@@ -33,6 +33,7 @@ from PedInterp import pedigree_processing, PED_export
 
 df = pedigree_processing('FAM1', raw_image_dir='images')   # reads images/FAM1.png
 PED_export(df, output_dir='ped')                            # writes ped/FAM1.ped
+GA4GH_export(df, output_dir='ped')                          # writes ped/FAM1_ga4gh-pedigree.json
 ```
 
 **`pedigree_processing(FamID, raw_image_dir='.', export=False, output_dir='.', image_path=None, upscale_factor=None, ocr='tesseract')`** reads a pedigree image and returns a pandas DataFrame with the columns FamilyID, IndividualID, PaternalID, MaternalID, Sex (1 male, 2 female, 0 unknown) and Phenotype (1 unaffected, 2 affected). There is a row for each person, generation by generation, and from left to right within a generation. PaternalID and MaternalID are 0 for anyone whose parents aren't in the drawing.
@@ -49,6 +50,10 @@ The image is enlarged in memory, so nothing is written next to it.
 
 **`PED_export(PED_df, output_dir='.')`** writes a DataFrame from `pedigree_processing` as a PED file, named after the family ID in its first row (`output_dir/<FamilyID>.ped`), and returns the file's path.
 
+**`GA4GH_export(PED_df, output_dir='.', condition=None)`** writes it as a GA4GH Pedigree (`output_dir/<FamilyID>_ga4gh-pedigree.json`), and returns the file's path. It is the form that [studio2ga4gh](https://github.com/comparativechrono/studio2ga4gh) writes and the lab's other GA4GH tools read, such as ga4gh2studio, phenopacket-toolkit and [PedNet](https://github.com/comparativechrono/PedNet): each person is a Phenopacket, and each parent is joined to their children by a relationship (`KIN:028` for a father, `KIN:027` for a mother). It is written with [pedigree-ga4gh](https://github.com/comparativechrono/pedigree-ga4gh), which is installed with PedInterp.
+
+- **condition** (pair of strings, optional): the condition the pedigree is about, as an ontology term and its label, such as `('MONDO:0007739', 'Huntington disease')`, or an HPO term such as `('HP:0000365', 'Hearing impairment')`, which is written as a phenotype rather than a disease (default: `('MONDO:0000001', 'disease')`, Mondo's most general term, as a picture doesn't say what the condition is). A GA4GH Pedigree records who is affected only through their conditions, so the affected have it, and the unaffected have it marked as excluded (looked for, and not found), so that their phenotypes can be read back from the file as they are in the PED file. The narrative names the picture, and how many times it was enlarged.
+
 ## From the command line
 
 Installing PedInterp also installs the `pedinterp` command, which reads a picture of a pedigree and writes the PED file:
@@ -56,9 +61,10 @@ Installing PedInterp also installs the `pedinterp` command, which reads a pictur
 ```bash
 pedinterp FAM1.png -d ped                  # writes ped/FAM1.ped
 pedinterp scan.jpg -f FAM2 --labels none   # numbers the people rather than reading their labels
+pedinterp FAM1.png --ga4gh --condition MONDO:0007739 "Huntington disease"   # FAM1.ped and FAM1_ga4gh-pedigree.json
 ```
 
-The family ID is the picture's name without its ending, unless `-f` gives another, and the PED file is named after it. The table is printed too, with how many times the picture was enlarged, unless `-q` is given. `--upscale` does what `upscale_factor` does, and `--labels none` what `ocr=None` does. If the picture can't be read, or has no pedigree in it, the command says why and exits with status 1; warnings, such as one for a label that wasn't matched to a symbol, are printed without stopping it. `pedinterp --help` lists the options.
+The family ID is the picture's name without its ending, unless `-f` gives another, and the PED file is named after it. The table is printed too, with how many times the picture was enlarged, unless `-q` is given. `--upscale` does what `upscale_factor` does, and `--labels none` what `ocr=None` does. `--ga4gh` writes the GA4GH Pedigree too, as `GA4GH_export` does, with `--condition ID LABEL` for its condition. If the picture can't be read, or has no pedigree in it, the command says why and exits with status 1; warnings, such as one for a label that wasn't matched to a symbol, are printed without stopping it. `pedinterp --help` lists the options.
 
 ## What PedInterp expects of a drawing
 
@@ -157,6 +163,8 @@ from PedInterp import pedigree_processing
 pedigree_processing('FAM1', image_path='FAM1.png', ocr=None).to_csv(sep='\\t', header=False, index=False)
 `);
 ```
+
+`GA4GH_export` also needs pedigree-ga4gh, which is plain Python too: copy its folder in the same way, or install it with micropip. It is imported only when the function is called, so reading a drawing doesn't need it.
 
 Reading a drawing takes a few seconds, and a good deal of memory for a large one, as the image is enlarged. Under Pyodide in Node, the four-generation test drawing, 1200 by 740 pixels, took about 10 seconds to read when enlarged ten times, and Pyodide's memory grew to about 880 MB; enlarged five times, it took 3 seconds and under 300 MB, and gave the same table. The factor PedInterp chooses keeps the image no larger than its symbols need, and never above 60 million pixels, but it's still worth running Pyodide in a web worker, so that the page doesn't freeze while it works.
 
