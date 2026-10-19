@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -361,8 +362,13 @@ def test_numbering_with_holes_in_the_labels(tmp_path, line, affected):
     people = {names[person]: (x, y, sex, was_affected and affected) for person, (x, y, sex, was_affected) in people.items()}
     couples = [(names[left], names[right], [names[child] for child in children]) for left, right, children in couples]
     draw_pedigree(tmp_path / 'pedigree.png', people, couples, size, line=line)
-    df = pedigree_processing('FAMH', image_path=str(tmp_path / 'pedigree.png'), ocr=None)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        df = pedigree_processing('FAMH', image_path=str(tmp_path / 'pedigree.png'), ocr=None)
     assert as_rows(df) == [row[:4] + [row[4] if affected else '1'] for row in TWO_GENERATIONS_NUMBERED]
+    # nor are they measured when the picture's enlargement is chosen: it is enlarged as its symbols need, not as the
+    # holes would
+    assert 0.7 * SYMBOL_PIXELS < df.attrs['upscale_factor'] * SYMBOL < 1.3 * SYMBOL_PIXELS
 
 
 def test_ocr_function(tmp_path):
@@ -612,6 +618,25 @@ def test_large_pictures_are_measured_in_a_smaller_copy(tmp_path, monkeypatch):
     factor = choose_upscale(str(tmp_path / 'large.png'))
     assert max(seen[0]) == 2000
     assert factor == pytest.approx(choose_upscale(str(tmp_path / 'p.png')) / 4, abs=0.15)
+
+
+def test_a_small_pedigree_on_a_large_page(tmp_path, monkeypatch):
+    # its symbols are too small a part of the page for the reading to find, but they are found when the picture is
+    # measured, and the warning says to cut the picture down to the pedigree
+    draw_pedigree(tmp_path / 'p.png', *THREE_GENERATIONS, labels=False)
+    drawing = Image.open(tmp_path / 'p.png')
+    page = Image.new('RGB', (drawing.width * 8, drawing.height * 8), 'white')
+    page.paste(drawing, (drawing.width, drawing.height))
+    page.save(tmp_path / 'page.png')
+    #(a limit on the pixels that keeps the reading of so large a page quick)
+    monkeypatch.setattr(core, 'MAX_PIXELS', page.width * page.height // 4)
+    with pytest.warns(UserWarning, match=r'too large to enlarge \d+\.\d times.*enlarged 0\.5 times.*cut the picture '
+                                         r'down to it') as caught, \
+         pytest.raises(ValueError, match='cut the picture down to the pedigree'):
+        pedigree_processing('FAMP', image_path=str(tmp_path / 'page.png'), ocr=None)
+    # and the factor the warning gives is the one that suits the symbols
+    (measured,) = [float(m.group(1)) for w in caught for m in [re.search(r'enlarge (\d+\.\d) times', str(w.message))] if m]
+    assert 0.7 * SYMBOL_PIXELS < measured * SYMBOL < 1.3 * SYMBOL_PIXELS
 
 
 def test_a_picture_without_symbols_is_enlarged_to_5000_pixels(tmp_path):
