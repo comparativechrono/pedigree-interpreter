@@ -1,0 +1,85 @@
+# Publishes PedInterp to PyPI.
+#
+# It uses PyPI's trusted publishing, so no token is stored anywhere. An owner of the project PedInterp on PyPI must
+# first allow this workflow to publish it: on PyPI, the project's Settings > Publishing > "Add a new publisher" >
+# GitHub, with the owner comparativechrono, the repository pedigree-interpreter, the workflow release.yml and the
+# environment pypi.
+#
+# The version comes from the tag (hatch-vcs), so there is nothing to set by hand. To release, merge, and publish a
+# GitHub release with a new tag such as v0.2.0, made on main; pushing the tag alone does the same. The workflow can
+# also be run by hand from the Actions tab, choosing the tag to run it on.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# a tag pushed and a release published for it would start two runs: the second waits, and finds nothing to upload
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # (the version is worked out from the tags)
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Check that it runs on a tag
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::Run the release on a tag, such as v0.2.0, not on a branch."
+            exit 1
+          fi
+      - name: Install Tesseract, and the fonts the tests draw with
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr fonts-dejavu-core libgl1
+      - name: Test
+        run: |
+          python -m pip install ".[test]"
+          python -m pytest
+      - name: Build
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Check that the version built is the tag's
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ls dist
+          if ! ls dist/*-"$version".tar.gz > /dev/null 2>&1; then
+            echo "::error::The package built is not version $version: is the tag on the commit that was built?"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v6
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/PedInterp/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
