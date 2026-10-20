@@ -326,10 +326,11 @@ def test_symbols():
     gray = np.array(image)
     symbols, line_width = detect_symbols(gray, gray.size)
     assert line_width == 30
-    found = sorted(((x + w // 2) // 1000, (y + h // 2) // 700, sex, phenotype) for (x, y, w, h), sex, phenotype in symbols)
-    assert found == [(0, 0, 1, 2), (0, 1, 1, 1),
-                     (1, 0, 2, 2), (1, 1, 2, 1),
-                     (2, 0, 0, 2), (2, 1, 0, 1)]
+    found = sorted(((x + w // 2) // 1000, (y + h // 2) // 700, sex, phenotype, shape)
+                   for (x, y, w, h), sex, phenotype, shape in symbols)
+    assert found == [(0, 0, 1, 2, 'square'), (0, 1, 1, 1, 'square'),
+                     (1, 0, 2, 2, 'circle'), (1, 1, 2, 1, 'circle'),
+                     (2, 0, 0, 2, 'diamond'), (2, 1, 0, 1, 'diamond')]
 
 
 def test_line_width():

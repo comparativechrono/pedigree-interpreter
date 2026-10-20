@@ -7,7 +7,7 @@ import pytest
 from PIL import Image
 
 import PedInterp.core as core
-from PedInterp import GA4GH_export, PED_export, pedigree_processing
+from PedInterp import GA4GH_export, PED_export, Studio_export, pedigree_processing
 from PedInterp.cli import main
 from drawings import sketch_picture, studio_picture
 from test_core import (COLUMNS, THREE_GENERATIONS, THREE_GENERATIONS_NUMBERED, TWO_GENERATIONS,
@@ -52,7 +52,8 @@ def test_ga4gh(tmp_path, capsys):
 
 
 def test_condition_errors(tmp_path, capsys):
-    # --condition belongs to --ga4gh, and must be a term a GA4GH file can name; nothing is read or written otherwise
+    # --condition belongs to --ga4gh or --studio, and must be a term a GA4GH file can name; nothing is read or written
+    # otherwise
     draw_pedigree(tmp_path / 'FAMP.png', *TWO_GENERATIONS, labels=False)
     out = tmp_path / 'out'
     assert main([str(tmp_path / 'FAMP.png'), '--labels', 'none', '-d', str(out), '--condition', 'MONDO:0007739', 'HD']) == 1
@@ -159,23 +160,46 @@ def test_runs_as_a_module():
 
 
 def test_hand_drawn(tmp_path, monkeypatch, capsys):
-    # --hand-drawn reads a sketch as one, with people numbered, and says which children are twins, as a PED file can't
+    # --hand-drawn reads a sketch as one, with people numbered, and --studio writes it as a Pedigree Studio drawing
     def tesseract(image):
         raise AssertionError('Tesseract should not be asked to read a sketch')
 
     monkeypatch.setattr(core, 'tesseract_words', tesseract)
     sketch_picture(tmp_path / 'sketch.png', SKETCH, SKETCH_COUPLES, SKETCH_TWINS, seed=0, pen=RED, width=4)
-    assert main([str(tmp_path / 'sketch.png'), '-d', str(tmp_path), '--hand-drawn']) == 0
+    assert main([str(tmp_path / 'sketch.png'), '-d', str(tmp_path), '--hand-drawn', '--studio']) == 0
     assert read_ped(tmp_path / 'sketch.ped')[COLUMNS].values.tolist() == SKETCH_READ
-    assert 'twins: II-2 and II-3 (not identical)' in capsys.readouterr().out
+    assert capsys.readouterr().out.splitlines()[-1] == f'wrote {tmp_path}/sketch.studio.json'
+    drawing = json.loads((tmp_path / 'sketch.studio.json').read_text())
+    assert [t['type'] for t in drawing['twinLinks']] == ['nonidentical']
 
 
-def test_twins_are_printed(tmp_path, capsys):
-    studio_picture(tmp_path / 'twins.png', TWINS, TWINS_COUPLES, [('II-2', 'II-3', 'MZ')])
-    assert main([str(tmp_path / 'twins.png'), '-d', str(tmp_path), '--labels', 'none']) == 0
-    assert 'twins: II-2 and II-3 (identical)' in capsys.readouterr().out
-    assert main([str(tmp_path / 'twins.png'), '-d', str(tmp_path), '--labels', 'none', '-q']) == 0
-    assert 'twins:' not in capsys.readouterr().out
+def test_the_ped_output_is_the_ped_file(tmp_path, capsys):
+    # what is printed is the PED file's table, with nothing a PED file can't hold, such as twins: the GA4GH Pedigree
+    # and the Studio drawing hold them
+    studio_picture(tmp_path / 'fam.png', TWINS, TWINS_COUPLES, [('II-2', 'II-3', 'MZ')])
+    assert main([str(tmp_path / 'fam.png'), '-d', str(tmp_path), '--labels', 'none', '--ga4gh', '--studio']) == 0
+    out = capsys.readouterr().out
+    assert 'twin' not in out.lower() and 'identical' not in out
+    assert all(len(line.split('\t')) == 6 for line in (tmp_path / 'fam.ped').read_text().splitlines())
+    doc = json.loads((tmp_path / 'fam_ga4gh-pedigree.json').read_text())
+    assert [(r['individualId'], r['relativeId']) for r in doc['relationships'] if r['relation']['id'] == 'KIN:010'] == \
+        [('II-2', 'II-3')]
+    drawing = json.loads((tmp_path / 'fam.studio.json').read_text())
+    assert [t['type'] for t in drawing['twinLinks']] == ['identical']
+
+
+def test_studio(tmp_path, capsys):
+    # --studio writes what Studio_export writes, naming the colour key after the condition, if one is given
+    draw_pedigree(tmp_path / 'FAMP.png', *THREE_GENERATIONS, labels=False)
+    assert main([str(tmp_path / 'FAMP.png'), '-d', str(tmp_path / 'cli'), '--labels', 'none', '-q', '--studio',
+                 '--condition', 'MONDO:0007739', 'Huntington disease']) == 0
+    assert capsys.readouterr().out.splitlines() == [f"wrote {tmp_path / 'cli'}/FAMP.ped",
+                                                    f"wrote {tmp_path / 'cli'}/FAMP.studio.json"]
+    df = pedigree_processing('FAMP', image_path=str(tmp_path / 'FAMP.png'), ocr=None)
+    expected = Studio_export(df, str(tmp_path / 'python'), condition=('MONDO:0007739', 'Huntington disease'))
+    drawing = json.loads((tmp_path / 'cli' / 'FAMP.studio.json').read_text())
+    assert drawing == json.load(open(expected))
+    assert list(drawing['legendLabels'].values()) == ['Huntington disease [MONDO:0007739]']
 
 
 def test_suggests_hand_drawn(tmp_path, monkeypatch, capsys):
