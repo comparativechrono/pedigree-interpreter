@@ -31,7 +31,9 @@ dependencies = [
 pedinterp = "PedInterp.cli:main"
 
 [project.optional-dependencies]
-test = ["pytest"]
+# studio2ped and studio2ga4gh, the lab's converters from Pedigree Studio, read the drawings Studio_export writes back,
+# for the tests that the drawings hold the same family
+test = ["pytest", "studio2ped>=0.2", "studio2ga4gh>=0.4"]
 
 [tool.hatch.version]
 source = "vcs"

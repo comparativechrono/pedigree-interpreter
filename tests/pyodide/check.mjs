@@ -3,7 +3,8 @@
 // (ocr=None), numbering the people; one is read again with an OCR function given words from JavaScript, as
 // tesseract.js's would be in a browser; and one with the default ocr, which should warn that Tesseract can't be run.
 // A family with twins, as Pedigree Studio draws it, and one sketched by hand (read with hand_drawn=True) are read too,
-// with their twins. Every table is compared with the one it should be. Run it from this folder:
+// with their twins, and written as Pedigree Studio drawings (Studio_export). Every table is compared with the one it
+// should be. Run it from this folder:
 //
 //   npm install          # Pyodide 0.29.5, as in package.json
 //   python draw.py       # with the Python the tests run with
@@ -62,10 +63,10 @@ pyodide.globals.set("expected", pyodide.toPy(expected));
 pyodide.globals.set("words_from_javascript", pyodide.toPy(expected.read.three_generations.words));
 
 const failures = await pyodide.runPythonAsync(`
-import sys, time, warnings
+import json, sys, time, warnings
 import cv2, numpy, pandas, PIL
 from PIL import Image
-from PedInterp import pedigree_processing
+from PedInterp import Studio_export, pedigree_processing
 
 print(f'Python {sys.version.split()[0]} on {sys.platform}, with OpenCV {cv2.__version__}, numpy {numpy.__version__}, '
       f'pandas {pandas.__version__} and Pillow {PIL.__version__}')
@@ -90,6 +91,7 @@ def check(name, description, want, warned=None, twins=None, **options):
         print('warnings:', messages)
         if not right:
             print('expected:', want)
+    return df
 
 for name, want in expected['numbered'].items():
     check(name, 'numbered', want, ocr=None)
@@ -105,8 +107,15 @@ check('two_generations', 'with the default ocr', expected['numbered']['two_gener
       warned="can't be read with Tesseract")
 
 for name, case in expected['more'].items():
-    check(name, 'hand-drawn, with twins' if case['hand_drawn'] else 'with twins', case['rows'], twins=case['twins'],
-          ocr=None, hand_drawn=case['hand_drawn'])
+    df = check(name, 'hand-drawn, with twins' if case['hand_drawn'] else 'with twins', case['rows'], twins=case['twins'],
+               ocr=None, hand_drawn=case['hand_drawn'])
+    # and as a Pedigree Studio drawing, with everyone in it, and the twins
+    drawing = json.load(open(Studio_export(df, '/home/pyodide/drawings')))
+    kinds = [link['type'] for link in drawing['twinLinks']]
+    right = len(drawing['persons']) == len(case['rows']) and \
+        kinds == ['identical' if kind == 'MZ' else 'nonidentical' for _, _, kind in case['twins']]
+    failures += not right
+    print(f'{name}, as a Pedigree Studio drawing: {"as expected" if right else "NOT AS EXPECTED"}')
 failures
 `);
 
