@@ -176,6 +176,58 @@ def test_specks_are_no_marks(tmp_path):
     assert not df[MARKS].values.any()
 
 
+def _arcs_one_by_one(ink, x, y, radius):
+    """where ink crosses a circle round (x, y), looked at round one point, as marks._three_ways looks round many"""
+    angles = np.arange(0, 360, 3)
+    xs = np.round(x + radius * np.cos(np.radians(angles))).astype(np.int64)
+    ys = np.round(y - radius * np.sin(np.radians(angles))).astype(np.int64)
+    inside = (xs >= 0) & (ys >= 0) & (xs < ink.shape[1]) & (ys < ink.shape[0])
+    on = np.zeros(len(angles), bool)
+    on[inside] = ink[ys[inside], xs[inside]] > 0
+    if on.all() or not on.any():
+        return []
+    start = int(np.argmin(on))
+    on = np.roll(on, -start)
+    arcs, k = [], 0
+    while k < len(on):
+        if on[k]:
+            j = k
+            while j < len(on) and on[j]:
+                j += 1
+            arcs.append((float((angles[start] + 3 * (k + j - 1) / 2) % 360), 3 * (j - k)))
+            k = j
+        else:
+            k += 1
+    return arcs
+
+
+def test_the_points_round_which_ink_runs_three_ways():
+    # the arrowhead's search looks round all the points of the ink at once (marks._three_ways): it keeps the points
+    # where circles at two radii next to each other cross the ink in three arcs, each with the arcs a point looked at
+    # on its own has
+    from PedInterp.marks import _three_ways
+    rng = np.random.default_rng(0)
+    ink = np.zeros((120, 160), np.uint8)
+    for _ in range(12):
+        cv2.line(ink, tuple(int(v) for v in rng.integers(0, 160, 2)), tuple(int(v) for v in rng.integers(0, 120, 2)), 1,
+                 int(rng.integers(1, 5)))
+    ink |= (rng.random(ink.shape) < 0.02).astype(np.uint8)
+    ys, xs = np.nonzero(ink)
+    radii = [5.0, 7.5, 10.0, 12.5]
+    found = {(int(x), int(y)): arcs for x, y, arcs in _three_ways(ink, xs, ys, radii)}
+    kept = 0
+    for x, y in zip(xs, ys):
+        each = [_arcs_one_by_one(ink, x, y, radius) for radius in radii]
+        each = [arcs if len(arcs) == 3 else None for arcs in each]
+        if not any(a is not None and b is not None for a, b in zip(each, each[1:])):
+            assert (int(x), int(y)) not in found
+            continue
+        kept += 1
+        assert [None if arcs is None else [(float(m), int(w)) for m, w in arcs]
+                for arcs in found[(int(x), int(y))]] == each
+    assert kept > 100
+
+
 def test_a_ped_file_cannot_hold_the_marks(tmp_path):
     studio_picture(tmp_path / 'marked.png', STUDIO, STUDIO_COUPLES, marks=STUDIO_MARKS)
     df = read(tmp_path / 'marked.png', marks=True)
