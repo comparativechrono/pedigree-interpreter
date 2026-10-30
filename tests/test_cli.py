@@ -213,3 +213,25 @@ def test_suggests_hand_drawn(tmp_path, monkeypatch, capsys):
     assert main([str(tmp_path / 'blank.png'), '-d', str(tmp_path), '--labels', 'none']) == 1
     err = capsys.readouterr().err
     assert 'read it with --hand-drawn' in err and 'hand_drawn=True' not in err
+
+
+def test_marks(tmp_path, capsys):
+    # --marks reads who has died, the proband and carriers too, which a PED file can't hold: no PED file is written,
+    # and the GA4GH Pedigree or the Studio drawing must be asked for
+    from test_marks import STUDIO, STUDIO_COUPLES, STUDIO_MARKS
+    studio_picture(tmp_path / 'marked.png', STUDIO, STUDIO_COUPLES, marks=STUDIO_MARKS)
+    assert main([str(tmp_path / 'marked.png'), '-d', str(tmp_path), '--labels', 'none', '--marks']) == 1
+    assert "a PED file can't hold the marks that --marks reads" in capsys.readouterr().err
+    assert main([str(tmp_path / 'marked.png'), '-d', str(tmp_path), '--labels', 'none', '--marks', '--ga4gh',
+                 '--studio']) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].split() == ['FamilyID', 'IndividualID', 'PaternalID', 'MaternalID', 'Sex', 'Phenotype', 'Deceased',
+                              'Proband', 'Carrier']
+    assert out[-2:] == [f'wrote {tmp_path}/marked_ga4gh-pedigree.json', f'wrote {tmp_path}/marked.studio.json']
+    assert not list(tmp_path.glob('*.ped'))
+    drawing = json.loads((tmp_path / 'marked.studio.json').read_text())
+    assert sum(p['deceased'] for p in drawing['persons']) == 5
+    assert sum(p['proband'] for p in drawing['persons']) == 2
+    assert sum(p['centerText'] == 'dot' for p in drawing['persons']) == 3
+    doc = json.loads((tmp_path / 'marked_ga4gh-pedigree.json').read_text())
+    assert doc['indexPatients'] == ['II-2', 'III-3']

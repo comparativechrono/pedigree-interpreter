@@ -116,6 +116,24 @@ for name, case in expected['more'].items():
         kinds == ['identical' if kind == 'MZ' else 'nonidentical' for _, _, kind in case['twins']]
     failures += not right
     print(f'{name}, as a Pedigree Studio drawing: {"as expected" if right else "NOT AS EXPECTED"}')
+
+# who has died, the proband and carriers, read with marks=True, and drawn in the Studio drawing
+for name, case in expected['marks'].items():
+    df = check(name, 'with marks' + (', hand-drawn' if case['hand_drawn'] else ''), case['rows'], ocr=None,
+               hand_drawn=case['hand_drawn'], marks=True)
+    found = {str(row['IndividualID']): sorted(mark.lower() for mark in ('Deceased', 'Proband', 'Carrier') if row[mark])
+             for _, row in df.iterrows()}
+    found = {person: marks for person, marks in found.items() if marks}
+    drawing = json.load(open(Studio_export(df, '/home/pyodide/drawings')))
+    counts = [sum(bool(p[key]) if key != 'centerText' else p[key] == 'dot' for p in drawing['persons'])
+              for key in ('deceased', 'proband', 'centerText')]
+    want = [sum(mark in marks for marks in case['marks'].values()) for mark in ('deceased', 'proband', 'carrier')]
+    right = found == case['marks'] and counts == want
+    failures += not right
+    print(f'{name}, its marks, and in a Pedigree Studio drawing: {"as expected" if right else "NOT AS EXPECTED"}')
+    if not right:
+        print('read:', found, counts)
+        print('expected:', case['marks'], want)
 failures
 `);
 
