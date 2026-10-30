@@ -355,6 +355,28 @@ def _arcs(ink, x, y, radius):
     return arcs
 
 
+def _runs_straight(ink, x, y, angle, start, end, line_width):
+    '''
+    Whether ink runs in a straight line from start to end pixels away from (x, y), about the way angle points (in
+    degrees, as _arcs measures them, give or take a few), with hardly a gap, near enough to the line for a stroke drawn
+    by hand
+    '''
+    t = np.arange(start, end + 0.5, 1.5)
+    reach = max(2.0, 0.5 * line_width + 1)
+    across = np.arange(-reach, reach + 0.5, 1.0)
+    for turn in (0, -4, 4, -8, 8):
+        a = math.radians(angle + turn)
+        ux, uy = math.cos(a), -math.sin(a)
+        xs = np.round(x + ux * t[:, None] - uy * across[None, :]).astype(np.int64)
+        ys = np.round(y + uy * t[:, None] + ux * across[None, :]).astype(np.int64)
+        inside = (xs >= 0) & (ys >= 0) & (xs < ink.shape[1]) & (ys < ink.shape[0])
+        on = np.zeros(xs.shape, bool)
+        on[inside] = ink[ys[inside], xs[inside]] > 0
+        if float(on.any(axis=1).mean()) >= 0.9:
+            return True
+    return False
+
+
 def _turn(a, b):
     '''the angle from a to b, in degrees, between -180 and 180'''
     return (b - a + 180) % 360 - 180
@@ -364,8 +386,10 @@ def _arrowhead(free, origin, symbol, line_width):
     '''
     Whether the head of an arrow points at a symbol from below on the left, where the arrow's line may run into other
     lines further on, as a line drawn down to children from a couple: a point near the symbol, on its lower left, from
-    which three strokes run away from the symbol, the line straight on away from it and the two sides of the head
-    either side of it. Found by looking round each point of the ink there (thinned to a line), at two distances.
+    which three straight strokes run away from the symbol, the line straight on away from it and running on well past
+    the head, and the two sides of the head either side of it, much alike. Found by looking round each point of the ink
+    there (thinned to a line), at a few distances: the strokes of the letters of a name or an age written under a
+    symbol are too short and too crooked to pass for these.
 
     free: the ink apart from the symbols, in the part of the drawing below the symbol on the left (_lower_left), whose
     top left corner is at origin
@@ -397,18 +421,31 @@ def _arrowhead(free, origin, symbol, line_width):
             continue
         if -cv2.pointPolygonTest(contour, (px, py), True) > 0.5 * size:
             continue
-        for radius in (0.1 * size, 0.15 * size):
+        # the three strokes, seen at two distances from the point next to each other: straight, so the same ways at
+        # both. The distances are far enough from the point to see the strokes apart, however thick the pen, and near
+        # enough not to pass the end of a short head, as Pedigree Studio draws it
+        seen = []
+        for radius in (r * size for r in (0.06, 0.08, 0.1, 0.12, 0.14)):
+            if radius < 1.8 * line_width + 2:
+                continue
             arcs = _arcs(thick, x, y, radius)
             if len(arcs) != 3 or any(w * math.pi / 180 * radius > 3 * line_width + 4 for _, w in arcs):
+                seen.append(None)
                 continue
-            turns = sorted(_turn(away, a) for a, _ in arcs)
-            if not (abs(turns[1]) <= 35 and 15 <= turns[1] - turns[0] <= 80 and 15 <= turns[2] - turns[1] <= 80):
+            seen.append(sorted(_turn(away, a) for a, _ in arcs))
+        for near, far in zip(seen, seen[1:]):
+            if near is None or far is None or any(abs(a - b) > 15 for a, b in zip(near, far)):
                 continue
-            # the line runs on, past the head
-            line = (away + turns[1]) % 360
-            if not any(abs(_turn(line, a)) <= 25 for a, _ in _arcs(thick, x, y, 0.25 * size)):
+            left, middle, right = far
+            # the line straight on away from the symbol, and the sides of the head either side of it, much alike
+            if not (abs(middle) <= 35 and 15 <= middle - left <= 80 and 15 <= right - middle <= 80 and
+                    abs((middle - left) - (right - middle)) <= 30):
                 continue
-            return True
+            # and the line runs on from the head, straight and unbroken, well past it (where it may cross another
+            # line): the strokes of letters are too short, and a word has gaps between its letters
+            line = (away + middle) % 360
+            if _runs_straight(thick, x, y, line, 0.15 * size, 0.35 * size, line_width):
+                return True
     return False
 
 

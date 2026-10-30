@@ -24,7 +24,7 @@ def _font(size):
 
 
 def studio_picture(path, people, couples, twins=(), size=None, labels=True, transparent=False, marks=None,
-                   inside=None):
+                   inside=None, under=None):
     '''
     Draws a pedigree as Pedigree Studio saves it: symbols 104 pixels across with lines 4 wide in a dark blue-grey, the
     line over a family's children 60 pixels above the highest of them, twins joined to a point on that line (with a
@@ -40,6 +40,8 @@ def studio_picture(path, people, couples, twins=(), size=None, labels=True, tran
            corner, through a triangle from its lower left corner and out past its side), 'proband' (a small arrow off
            the lower left corner) and 'carrier' (a dot in the middle, white in a symbol filled in)
     inside: id -> a letter written in the middle of their symbol, as the Studio writes P, D or S there
+    under: id -> text written under their symbol, a line or more, as the Studio writes a name and an age there, and
+           where it writes it
     '''
     scale = 2   # drawn twice as large, and shrunk, which smooths the lines as the Studio's are
     width = size[0] if size else max(x for x, *_ in people.values()) + SHAPE + 120
@@ -123,6 +125,16 @@ def studio_picture(path, people, couples, twins=(), size=None, labels=True, tran
         if pid in (inside or {}):
             draw.text(s((x + SHAPE / 2, middle_y))[0], inside[pid], font=_font(32 * scale), anchor='mm',
                       fill=(255, 255, 255) if affected else INK)
+        if pid in (under or {}):
+            # (where the Studio writes it: from a little right of the middle, but for the partner on the left of a
+            # couple, ending a little left of it, and further down for a proband, clear of the arrow)
+            font = _font(22 * scale)
+            for k, line in enumerate(under[pid].split('\n')):
+                if pid in {left for left, _, _ in couples}:
+                    top = y + SHAPE + 4 + (36 if 'proband' in drawn else 0) + 30 * k
+                    draw.text(s((x + SHAPE - 60, top))[0], line, font=font, anchor='ra', fill=INK)
+                else:
+                    draw.text(s((x + 60, y + SHAPE + 4 + 30 * k))[0], line, font=font, anchor='la', fill=INK)
     if labels:
         font = _font(18 * scale)
         for pid, (x, y, *_ ) in people.items():

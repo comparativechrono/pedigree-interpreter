@@ -100,6 +100,17 @@ def test_letters_in_a_symbol_are_no_dot(tmp_path):
     assert not df[MARKS].values.any()
 
 
+def test_names_and_ages_under_the_symbols_are_no_marks(tmp_path):
+    # as the Studio writes them under its symbols, in letters whose strokes meet as an arrow's do
+    under = {'I-1': 'Nnamdi\nd. 82', 'I-2': 'Adanna\nd. 90', 'II-1': 'Ngozi, 84', 'II-2': 'Kwame, 47',
+             'II-3': 'Grace, 78\nbreast cancer', 'II-4': 'Samuel\nd. 79', 'III-1': 'Ada, 14', 'III-2': '2016',
+             'III-3': 'Yusuf, 7'}
+    studio_picture(tmp_path / 'named.png', STUDIO, STUDIO_COUPLES, marks=STUDIO_MARKS, under=under)
+    df = read(tmp_path / 'named.png', marks=True)
+    assert rows(df) == STUDIO_READ
+    assert marks_of(df) == STUDIO_MARKS
+
+
 def test_a_hatched_symbol_is_not_slashed(tmp_path):
     # a symbol hatched with lines rising to the right, as the slash does, has died no more than one left empty
     studio_picture(tmp_path / 'hatched.png', STUDIO, STUDIO_COUPLES)
