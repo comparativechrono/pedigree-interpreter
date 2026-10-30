@@ -23,7 +23,8 @@ def _font(size):
         pytest.skip('needs the DejaVu Sans Bold font to draw the labels')
 
 
-def studio_picture(path, people, couples, twins=(), size=None, labels=True, transparent=False):
+def studio_picture(path, people, couples, twins=(), size=None, labels=True, transparent=False, marks=None,
+                   inside=None, under=None):
     '''
     Draws a pedigree as Pedigree Studio saves it: symbols 104 pixels across with lines 4 wide in a dark blue-grey, the
     line over a family's children 60 pixels above the highest of them, twins joined to a point on that line (with a
@@ -35,6 +36,12 @@ def studio_picture(path, people, couples, twins=(), size=None, labels=True, tran
     couples: (partner on the left, partner on the right, [children])
     twins: (twin, twin, 'MZ' or 'DZ'), each pair children of one couple
     labels: whether to write the numbers, or {id: text} to write other text
+    marks: id -> the marks on their symbol, drawn as the Studio draws them: any of 'deceased' (a slash from corner to
+           corner, through a triangle from its lower left corner and out past its side), 'proband' (a small arrow off
+           the lower left corner) and 'carrier' (a dot in the middle, white in a symbol filled in)
+    inside: id -> a letter written in the middle of their symbol, as the Studio writes P, D or S there
+    under: id -> text written under their symbol, a line or more, as the Studio writes a name and an age there, and
+           where it writes it
     '''
     scale = 2   # drawn twice as large, and shrunk, which smooths the lines as the Studio's are
     width = size[0] if size else max(x for x, *_ in people.values()) + SHAPE + 120
@@ -98,6 +105,36 @@ def studio_picture(path, people, couples, twins=(), size=None, labels=True, tran
         else:
             draw.polygon(s((x + SHAPE / 2, y + 6), (x + SHAPE - 4, y + SHAPE - 14), (x + 4, y + SHAPE - 14)),
                          outline=INK, width=stroke, fill=fill)
+    for pid, (x, y, sex, affected) in people.items():
+        drawn = set((marks or {}).get(pid, ()))
+        middle_y = y + SHAPE / 2 + (8 if sex == 'T' else 0)
+        if 'deceased' in drawn:
+            if sex == 'T':
+                draw.line(s((x + 4, y + SHAPE - 14), (x + 84, y + SHAPE - 86)), fill=INK, width=stroke)
+            else:
+                draw.line(s((x, y + SHAPE), (x + SHAPE, y)), fill=INK, width=stroke)
+        if 'carrier' in drawn:
+            r = 10
+            draw.ellipse(s((x + SHAPE / 2 - r, middle_y - r), (x + SHAPE / 2 + r, middle_y + r)),
+                         fill=(255, 255, 255) if affected else INK)
+        if 'proband' in drawn:
+            # (as the Studio draws it: off the lower left corner, pointing at it, with a head of two short strokes)
+            tip = (x - 12, y + SHAPE + 16)
+            for end in ((tip[0] - 28, tip[1] + 28), (tip[0] - 14, tip[1]), (tip[0], tip[1] + 14)):
+                draw.line(s(tip, end), fill=INK, width=4 * scale)
+        if pid in (inside or {}):
+            draw.text(s((x + SHAPE / 2, middle_y))[0], inside[pid], font=_font(32 * scale), anchor='mm',
+                      fill=(255, 255, 255) if affected else INK)
+        if pid in (under or {}):
+            # (where the Studio writes it: from a little right of the middle, but for the partner on the left of a
+            # couple, ending a little left of it, and further down for a proband, clear of the arrow)
+            font = _font(22 * scale)
+            for k, line in enumerate(under[pid].split('\n')):
+                if pid in {left for left, _, _ in couples}:
+                    top = y + SHAPE + 4 + (36 if 'proband' in drawn else 0) + 30 * k
+                    draw.text(s((x + SHAPE - 60, top))[0], line, font=font, anchor='ra', fill=INK)
+                else:
+                    draw.text(s((x + 60, y + SHAPE + 4 + 30 * k))[0], line, font=font, anchor='la', fill=INK)
     if labels:
         font = _font(18 * scale)
         for pid, (x, y, *_ ) in people.items():
@@ -200,8 +237,34 @@ def scribble(poly, rng, pen):
     return _wobble(_densify([(cx + x * c - y * s, cy + x * s + y * c) for x, y in path], rng, (2.0, 5.0)), rng, 0.6)
 
 
+def slash(cx, cy, size, rng):
+    '''a slash drawn by hand through a symbol, rising to the right and out past it at both ends'''
+    r = size * float(rng.uniform(0.68, 0.78))
+    return rough_line((cx - r, cy + r), (cx + r, cy - r), rng)
+
+
+def arrow(cx, cy, size, rng):
+    '''a proband's arrow drawn by hand: a line up from the lower left to just off the symbol, and a head of two strokes'''
+    d = (-math.cos(math.radians(45)), math.sin(math.radians(45)))
+    edge = size / 2 * float(rng.uniform(1.15, 1.3))
+    tip = (cx + d[0] * edge, cy + d[1] * edge)
+    tail = (tip[0] + d[0] * 0.6 * size, tip[1] + d[1] * 0.6 * size)
+    ends = [(tip[0] + 0.2 * size * math.cos(math.atan2(d[1], d[0]) + turn),
+             tip[1] + 0.2 * size * math.sin(math.atan2(d[1], d[0]) + turn)) for turn in (0.6, -0.6)]
+    return [rough_line(tail, tip, rng), np.concatenate([rough_line(ends[0], tip, rng), rough_line(tip, ends[1], rng)])]
+
+
+def dot(cx, cy, size, width):
+    '''a carrier's dot drawn by hand: a small spiral in to the middle, close enough for the pen to fill it in'''
+    r = 0.09 * size
+    turns = max(2, int(math.ceil(r / (0.7 * width))) + 1)
+    t = np.linspace(0, 1, 24 * turns + 1)
+    return np.stack([cx + (r * (1 - t) + 0.3) * np.cos(2 * math.pi * turns * t),
+                     cy + (r * (1 - t) + 0.3) * np.sin(2 * math.pi * turns * t)], axis=1)
+
+
 def sketch_picture(path, people, couples, twins=(), seed=0, pen=(192, 57, 43), width=4, studio=(), transparent=False,
-                   size=None, room=(22, 32)):
+                   size=None, room=(22, 32), marks=None):
     '''
     Sketches a pedigree by hand, as with Pedigree Studio's Draw tool: symbols of unequal sizes whose outlines don't
     quite close, or run on, affected ones scribbled in, and lines that wobble and stop short of what they join or run
@@ -214,6 +277,8 @@ def sketch_picture(path, people, couples, twins=(), seed=0, pen=(192, 57, 43), w
     pen: the pen's colour, as (red, green, blue)
     room: how far above the children the line over them is drawn, from the top of the highest of them, at the least
         and at the most
+    marks: id -> the marks drawn by hand on their symbol: any of 'deceased' (a slash), 'proband' (an arrow at the
+        lower left) and 'carrier' (a dot in the middle)
     '''
     rng = np.random.default_rng(seed)
     w = size[0] if size else int(max(x + s for x, _, s, *_ in people.values()) + 80)
@@ -274,6 +339,15 @@ def sketch_picture(path, people, couples, twins=(), seed=0, pen=(192, 57, 43), w
                 xs.append(k['x'])
                 strokes.append(rough_line((k['x'], ysib + float(rng.uniform(-3, 4))), (k['x'], k['y'] - k['size'] / 2 - gap()), rng))
         strokes.append(rough_line((min(xs) - float(rng.uniform(-3, 3)), ysib), (max(xs) + float(rng.uniform(-3, 3)), ysib), rng))
+    # (the marks last, so that the rest is drawn the same with them or without)
+    for pid, drawn in sorted((marks or {}).items()):
+        p = P[pid]
+        if 'deceased' in drawn:
+            strokes.append(slash(p['x'], p['y'], p['size'], rng))
+        if 'proband' in drawn:
+            strokes += arrow(p['x'], p['y'], p['size'], rng)
+        if 'carrier' in drawn:
+            strokes.append(dot(p['x'], p['y'], p['size'], width))
     for pts in strokes:
         cv2.polylines(img, [np.round(np.asarray(pts) * 16).astype(np.int32)], False, colour, width, cv2.LINE_AA, shift=4)
     # the Studio's symbols, and the lines among them, drawn as it draws them

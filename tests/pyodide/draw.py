@@ -3,9 +3,10 @@ Draws the pedigrees that check.mjs reads with PedInterp under Pyodide, and write
 
 The pedigrees are the tests' two-, three- and four-generation ones, each drawn with its labels and without; and, from
 the tests of twins and sketches, a family with identical twins as Pedigree Studio draws it, and a family sketched by
-hand, which is read with hand_drawn=True. Run this with the Python the tests run with: it needs pytest, Pillow,
-OpenCV, the DejaVu Sans fonts and PedInterp's dependencies. The images and expected.json go in the folder work, next
-to this file.
+hand, which is read with hand_drawn=True; and, from the tests of marks, a family drawn as the Studio draws it and the
+sketch, with who has died, the proband and carriers marked on them, which are read with marks=True. Run this with the
+Python the tests run with: it needs pytest, Pillow, OpenCV, the DejaVu Sans fonts and PedInterp's dependencies. The
+images and expected.json go in the folder work, next to this file.
 '''
 import json
 import sys
@@ -18,6 +19,7 @@ here = Path(__file__).resolve().parent
 sys.path[:0] = [str(here.parent), str(here.parent.parent / 'src')]
 
 import test_core  # noqa: E402
+import test_marks as marked  # noqa: E402
 import test_twins_and_sketches as twins  # noqa: E402
 from drawings import sketch_picture, studio_picture  # noqa: E402
 
@@ -42,8 +44,17 @@ def main():
                    width=4)
     more = {'studio_twins': {'rows': twins.TWINS_READ, 'twins': [['II-2', 'II-3', 'MZ']], 'hand_drawn': False},
             'sketch': {'rows': twins.SKETCH_READ, 'twins': [['II-2', 'II-3', 'DZ']], 'hand_drawn': True}}
-    (work / 'expected.json').write_text(json.dumps({'numbered': numbered, 'read': read, 'more': more}, indent=1))
-    print(f'Drew {len(numbered) + len(more)} pedigrees in {work}')
+    # the same, with marks on them
+    studio_picture(work / 'studio_marks.png', marked.STUDIO, marked.STUDIO_COUPLES, marks=marked.STUDIO_MARKS)
+    sketch_picture(work / 'sketch_marks.png', twins.SKETCH, twins.SKETCH_COUPLES, twins.SKETCH_TWINS, seed=0,
+                   pen=twins.RED, width=4, marks=marked.SKETCH_MARKS)
+    marks = {'studio_marks': {'rows': marked.STUDIO_READ, 'hand_drawn': False,
+                              'marks': {person: sorted(m) for person, m in marked.STUDIO_MARKS.items()}},
+             'sketch_marks': {'rows': twins.SKETCH_READ, 'hand_drawn': True,
+                              'marks': {person: sorted(m) for person, m in marked.SKETCH_MARKS.items()}}}
+    (work / 'expected.json').write_text(json.dumps({'numbered': numbered, 'read': read, 'more': more, 'marks': marks},
+                                                   indent=1))
+    print(f'Drew {len(numbered) + len(more) + len(marks)} pedigrees in {work}')
 
 
 if __name__ == '__main__':
