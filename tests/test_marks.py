@@ -7,6 +7,7 @@ import warnings
 
 import cv2
 import numpy as np
+import pandas as pd
 import pytest
 
 from PedInterp import GA4GH_export, PED_export, Studio_export, pedigree_processing
@@ -127,6 +128,54 @@ def test_a_hatched_symbol_is_not_slashed(tmp_path):
     assert not df.loc[df['IndividualID'] == 'II-1', 'Deceased'].item()
 
 
+def _inside(picture, person):
+    '''the inside of a person's symbol in STUDIO, within its outline'''
+    x, y, sex, _ = STUDIO[person]
+    inside = np.zeros(picture.shape[:2], np.uint8)
+    if sex == 'F':
+        cv2.circle(inside, (x + SHAPE // 2, y + SHAPE // 2), SHAPE // 2 - 4, 1, -1)
+    elif sex == 'M':
+        cv2.rectangle(inside, (x + 4, y + 4), (x + SHAPE - 4, y + SHAPE - 4), 1, -1)
+    else:
+        half = SHAPE // 2
+        cv2.fillPoly(inside, [np.array([(x + half, y + 4), (x + SHAPE - 4, y + half), (x + half, y + SHAPE - 4),
+                                        (x + 4, y + half)], np.int32)], 1)
+    return inside
+
+
+@pytest.mark.parametrize('offset', [0, 4, 8])
+def test_a_symbol_shaded_with_dots_is_not_slashed(tmp_path, offset):
+    # Pedigree Studio's shading with dots (Pattern → Dots): a dot of radius 1.6 every 8 of its units, in the colour of
+    # its lines, which runs along a line rising to the right as a slash does, but in dots; here in an empty circle,
+    # square and diamond, with the dots where the Studio puts them (offset 0) and between
+    studio_picture(tmp_path / 'dots.png', STUDIO, STUDIO_COUPLES)
+    picture = cv2.imread(str(tmp_path / 'dots.png'))
+    shade = np.zeros(picture.shape[:2], np.uint8)
+    for person in ('II-1', 'II-4', 'III-2'):
+        x, y, *_ = STUDIO[person]
+        dots = np.zeros_like(shade)
+        for dx in range(8 + offset - 16, SHAPE + 16, 16):
+            for dy in range(8 + offset - 16, SHAPE + 16, 16):
+                cv2.circle(dots, (x + dx, y + dy), 3, 1, -1)
+        shade |= dots & _inside(picture, person)
+    picture[shade > 0] = (50, 35, 26)
+    cv2.imwrite(str(tmp_path / 'dots.png'), picture)
+    df = read(tmp_path / 'dots.png', marks=True)
+    assert rows(df) == STUDIO_READ
+    assert not df[MARKS].values.any()
+
+
+def test_specks_are_no_marks(tmp_path):
+    # a picture with dark specks all over it, as a poor scan may have (one pixel in 500): no slash is read from specks
+    # in a row, nor an arrow or a dot
+    studio_picture(tmp_path / 'specks.png', STUDIO, STUDIO_COUPLES)
+    picture = cv2.imread(str(tmp_path / 'specks.png'), cv2.IMREAD_GRAYSCALE)
+    picture[np.random.default_rng(0).random(picture.shape) < 0.002] = 40
+    cv2.imwrite(str(tmp_path / 'specks.png'), picture)
+    df = read(tmp_path / 'specks.png', marks=True)
+    assert not df[MARKS].values.any()
+
+
 def test_a_ped_file_cannot_hold_the_marks(tmp_path):
     studio_picture(tmp_path / 'marked.png', STUDIO, STUDIO_COUPLES, marks=STUDIO_MARKS)
     df = read(tmp_path / 'marked.png', marks=True)
@@ -145,17 +194,62 @@ def test_ga4gh_pedigree_with_marks(tmp_path):
     df = read(tmp_path / 'marked.png', marks=True)
     doc = json.load(open(GA4GH_export(df, str(tmp_path))))
     status = {p['subject']['id']: p['subject'].get('vitalStatus', {}).get('status') for p in doc['individuals']}
-    assert status == {person: 'DECEASED' if 'deceased' in STUDIO_MARKS.get(person, ()) else 'ALIVE'
-                      for person in status}
+    # (those with a slash have died, and those whose symbol is empty without one haven't; a symbol filled in may hide a
+    # slash, as the Studio's through a filled square is hidden, so those without one seen have no vital status)
+    assert status == {person: 'DECEASED' if 'deceased' in STUDIO_MARKS.get(person, ()) else
+                      None if affected else 'ALIVE' for person, (*_, affected) in STUDIO.items()}
     assert doc['indexPatients'] == ['II-2', 'III-3']
     assert '; proband II-2, III-3.' in doc['narrative']
     assert doc['narrative'].endswith('Deaths, probands and carriers were read from the marks drawn on the symbols. '
-                                     'II-1 is a carrier. II-4 is a carrier. III-1 is a carrier.')
+                                     'A filled symbol may hide a slash, so the affected have no vital status unless '
+                                     'one was seen. II-1 is a carrier. II-4 is a carrier. III-1 is a carrier.')
     # without marks, as before: no vital status, and no index patient
     plain = json.load(open(GA4GH_export(read(tmp_path / 'marked.png'), str(tmp_path / 'plain'))))
     assert not any('vitalStatus' in p['subject'] for p in plain['individuals'])
     assert 'indexPatients' not in plain
     assert 'carrier' not in plain['narrative']
+
+
+def test_a_pregnancy_lost_has_died(tmp_path):
+    # in the GA4GH Pedigree, a triangle has died, slash or none, as studio2ga4gh writes the Studio's, with a note in the
+    # narrative; and each person's vital status is as studio2ga4gh gives it from the drawing made from the same table,
+    # but for the affected with no slash seen, which the fill may hide
+    sketch_picture(tmp_path / 'sketch.png', SKETCH, SKETCH_COUPLES, SKETCH_TWINS, seed=0, pen=RED, width=4,
+                   marks=SKETCH_MARKS)
+    df = read(tmp_path / 'sketch.png', marks=True, hand_drawn=True)
+    assert df.attrs['layout']['III-3']['shape'] == 'triangle'
+    assert not df.loc[df['IndividualID'] == 'III-3', 'Deceased'].item()
+    doc = json.load(open(GA4GH_export(df, str(tmp_path))))
+    status = {p['subject']['id']: p['subject'].get('vitalStatus', {}).get('status') for p in doc['individuals']}
+    assert status['III-3'] == 'DECEASED'
+    assert ' III-3 is a pregnancy loss.' in doc['narrative']
+    studio2ga4gh = pytest.importorskip('studio2ga4gh')
+    drawing = json.load(open(Studio_export(df, str(tmp_path))))
+    kindred, = studio2ga4gh.convert(drawing).kindreds
+    ids = [str(p) for p in df['IndividualID']]
+    by_number = {p['id']: ids[k] for k, p in enumerate(drawing['persons'][:len(ids)])}
+    from_drawing = {by_number.get(m.id, m.id): m.vital_status for m in kindred.members}
+    affected = {str(r.IndividualID): int(r.Phenotype) == 2 for r in df.itertuples(index=False)}
+    for person, said in status.items():
+        assert said == from_drawing[person] or (said is None and affected[person] and
+                                                from_drawing[person] == 'ALIVE'), person
+
+
+def test_marks_left_missing_are_not_marks(tmp_path):
+    # a table whose marks were filled in by hand, with some left missing: those people haven't the mark
+    studio_picture(tmp_path / 'marked.png', STUDIO, STUDIO_COUPLES, marks=STUDIO_MARKS)
+    df = read(tmp_path / 'marked.png', marks=True)
+    df['Carrier'] = df['Carrier'].astype('boolean')
+    df.loc[df['IndividualID'] == 'II-1', 'Carrier'] = pd.NA
+    df['Deceased'] = df['Deceased'].astype(object)
+    df.loc[df['IndividualID'] == 'I-1', 'Deceased'] = None
+    doc = json.load(open(GA4GH_export(df, str(tmp_path))))
+    assert ' II-1 is a carrier.' not in doc['narrative'] and ' II-4 is a carrier.' in doc['narrative']
+    status = {p['subject']['id']: p['subject'].get('vitalStatus', {}).get('status') for p in doc['individuals']}
+    assert status['I-1'] == 'ALIVE' and status['I-2'] == 'DECEASED'
+    drawing = json.load(open(Studio_export(df, str(tmp_path))))
+    centres = {p['id']: p['centerText'] for p in drawing['persons']}
+    assert sum(text == 'dot' for text in centres.values()) == 2
 
 
 def test_studio_drawing_with_marks(tmp_path):
