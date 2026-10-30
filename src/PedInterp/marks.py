@@ -135,13 +135,18 @@ def _slashed(ink, symbol, line_width):
             best, best_cover = (k, m), min(sides)
     if best_cover < SLASH_INSIDE:
         return False, False
-    # (hatching or shading: much ink inside away from the line, and from the middle, where a carrier's dot is)
+    # (hatching or shading: much ink inside away from the line, and from the middle, where a carrier's dot is; or many
+    # pieces of ink inside, each too big for a speck, as the dots of the Studio's shading are, where the inside is too
+    # small to tell a slash from a row of them: a slash is one piece, with a carrier's dot or a letter beside it at most)
     k, m = best
     ys, xs = np.nonzero(window & inner)
     dx, dy = xs - cx, ys - cy
     distance = np.abs(dx * across[k, 0] + dy * across[k, 1] - offsets[m])
     away = (distance > near + line_width) & (np.hypot(dx, dy) > 0.18 * size)
-    return float(away.sum()) <= 0.08 * float(inner.sum()), False
+    if float(away.sum()) > 0.08 * float(inner.sum()):
+        return False, False
+    _, _, stats, _ = cv2.connectedComponentsWithStats((window & inner).astype(np.uint8), connectivity=8)
+    return int((stats[1:, cv2.CC_STAT_AREA] >= line_width ** 2).sum()) < 5, False
 
 
 def _stubs(window, outer, centre, size, line_width):

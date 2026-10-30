@@ -143,11 +143,13 @@ def _inside(picture, person):
     return inside
 
 
+@pytest.mark.parametrize('hand_drawn', [False, True])
 @pytest.mark.parametrize('offset', [0, 4, 8])
-def test_a_symbol_shaded_with_dots_is_not_slashed(tmp_path, offset):
+def test_a_symbol_shaded_with_dots_is_not_slashed(tmp_path, offset, hand_drawn):
     # Pedigree Studio's shading with dots (Pattern → Dots): a dot of radius 1.6 every 8 of its units, in the colour of
     # its lines, which runs along a line rising to the right as a slash does, but in dots; here in an empty circle,
-    # square and diamond, with the dots where the Studio puts them (offset 0) and between
+    # square and diamond, with the dots where the Studio puts them (offset 0) and between, read as a drawing and as a
+    # sketch (where the diamond's inside, as it is measured, is smaller)
     studio_picture(tmp_path / 'dots.png', STUDIO, STUDIO_COUPLES)
     picture = cv2.imread(str(tmp_path / 'dots.png'))
     shade = np.zeros(picture.shape[:2], np.uint8)
@@ -160,7 +162,7 @@ def test_a_symbol_shaded_with_dots_is_not_slashed(tmp_path, offset):
         shade |= dots & _inside(picture, person)
     picture[shade > 0] = (50, 35, 26)
     cv2.imwrite(str(tmp_path / 'dots.png'), picture)
-    df = read(tmp_path / 'dots.png', marks=True)
+    df = read(tmp_path / 'dots.png', marks=True, hand_drawn=hand_drawn)
     assert rows(df) == STUDIO_READ
     assert not df[MARKS].values.any()
 
